@@ -9139,6 +9139,19 @@
       "Every Job"
     ]
   },
+  "13006": {
+    "type": "Weapon",
+    "class": "Dagger",
+    "desc": "A dark dagger whose hilt is crafted from a black dragon scale. +10% chance of Curse on melee attack.",
+    "atk": "150",
+    "reqLevel": "65",
+    "weaponLevel": "3",
+    "slot": "0",
+    "jobs": [
+      "Ninja"
+    ],
+    "buyPrice": 240000
+  },
   "13008": {
     "type": "Weapon",
     "class": "Dagger",
