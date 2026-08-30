@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.0.1
+// @version      1.0.3
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -123,7 +123,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.0.1';
+  const VERSION = '1.0.3';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // keys ที่บันทึก/โหลด (boolean/number/array/string — ไม่เก็บ function หรือ object ซ้อน)
@@ -586,7 +586,7 @@
     wanderMaxStep: 20,            // สุ่มระยะ ≤20 ช่อง
     wanderCooldownMs: 3000,
     warpFindEnabled: true,       // ไม่เจอมอนนาน → วาร์ปสุ่ม (default ON)
-    noMonsterWarpSec: 5,          // ไม่เจอมอนต่อเนื่อง N วินาที → วาร์ปสุ่ม
+    noMonsterWarpSec: 2,          // ไม่เจอมอนต่อเนื่อง N วินาที → วาร์ปสุ่ม
 
     // โหมดกรองของ: 'all' = เก็บหมด, 'only' = เก็บเฉพาะ, 'except' = ยกเว้น
     filter: { mode: 'except', onlyItems: [], exceptItems: [909,916,1302,1602,2302,1750,517,1701,1702,1010,935,917,938,949,519,507,512,516,1501,511] },
@@ -645,6 +645,14 @@
 
   // ★ โหลดค่าที่บันทึกไว้จาก localStorage (ทับ default)
   loadConfig();
+  // เปลี่ยนค่าเริ่มต้น 5s → 2s เพียงครั้งเดียว; ไม่ทับคนที่ตั้งค่าอื่นเอง.
+  try {
+    const migrationKey = 'roPureNoMonsterWarpDefaultV2';
+    if (!localStorage.getItem(migrationKey)) {
+      if (Number(CFG.noMonsterWarpSec) === 5) { CFG.noMonsterWarpSec = 2; saveConfig(); }
+      localStorage.setItem(migrationKey, '1');
+    }
+  } catch (_) {}
   // ย้ายค่าจากรุ่นที่มี URL queue ช่องเดียวไปเป็น Localhost/Cloudflare แบบแยกกันหนึ่งครั้ง.
   // เก็บ lootQueueUrl เดิมไว้เสมอเพื่อให้ย้อนกลับไปใช้ script รุ่นเก่าได้โดยไม่เสียค่า endpoint.
   function lootQueueTransportMode() {
@@ -3016,12 +3024,17 @@
             if (m) { m.x = ex; m.y = ey; m._lastSeenAt = now; m._isMiniBoss = true; }
             else { entities.set(eid, { id: eid, kind: 1, x: ex, y: ey, alive: true, _lastSeenAt: now, _isMiniBoss: true, name: 'Mini Boss' }); }
           } else if (eflag === 1) {
-            // ★ flag=1 = ผู้เล่นอื่นบนแมป (minimap marker) → track เป็น kind=0
+            // ★ flag=1 = ผู้เล่นบนแมป (รวมตัวเรา) → track เป็น kind=0
             let m = entities.get(eid);
             if (m) { m.x = ex; m.y = ey; m._lastSeenAt = now; }
             else { entities.set(eid, { id: eid, kind: 0, x: ex, y: ey, alive: true, _lastSeenAt: now, name: '' }); }
-            const playerEntity = entities.get(eid);
-            if (playerEntity) instantFleeCheck(playerEntity);
+            // Self beacon มักมาแทน MOVE_UPDATE หลังวาร์ป/เดิน จึงต้อง sync
+            // ตัวแปรกลางด้วย ไม่เช่น combat/wander จะใช้พิกัดเก่าจน server เมิน 0x07.
+            if (eid === playerId) setPlayerPosition(ex, ey);
+            else {
+              const playerEntity = entities.get(eid);
+              if (playerEntity) instantFleeCheck(playerEntity);
+            }
           }
         }
       } else if (sub === 1 && u.length >= 12) {
@@ -3031,12 +3044,15 @@
         const flag = u[11];
         if (id && x >= -500 && x <= 1000 && y >= -500 && y <= 1000 && (flag === 1 || flag === 3 || flag === 4)) {
           if (flag === 1) {
-            // ★ flag=1 = ผู้เล่นอื่นบนแมป (minimap marker) → track เป็น kind=0
+            // ★ flag=1 = ผู้เล่นบนแมป (รวมตัวเรา) → track เป็น kind=0
             let m = entities.get(id);
             if (m) { m.x = x; m.y = y; m._lastSeenAt = now; }
             else { entities.set(id, { id, kind: 0, x, y, alive: true, _lastSeenAt: now, name: '' }); }
-            const playerEntity = entities.get(id);
-            if (playerEntity) instantFleeCheck(playerEntity);
+            if (id === playerId) setPlayerPosition(x, y);
+            else {
+              const playerEntity = entities.get(id);
+              if (playerEntity) instantFleeCheck(playerEntity);
+            }
           } else {
             // ★ flag=3 = Mini Boss, flag=4 = Boss
             const isRealBoss = (flag === 4);
