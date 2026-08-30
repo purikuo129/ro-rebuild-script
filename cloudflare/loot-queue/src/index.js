@@ -199,7 +199,7 @@ export class LootQueue {
     events.push(entry);
     if (events.length > MAX_RECENT_EVENTS) events.splice(0, events.length - MAX_RECENT_EVENTS);
     await this.ctx.storage.put(EVENT_LOG_KEY, events);
-    console.log('[loot-queue]', JSON.stringify(entry));
+    console.log({ source: 'loot-queue', ...entry });
   }
 
   async expireJobs() {
