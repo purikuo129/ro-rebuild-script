@@ -1,13 +1,13 @@
 // ==UserScript==
-// @name         RO Rebuild Web Assist
-// @namespace    ro-rebuild-web-assist
-// @version      4.58.1
+// @name         RO Rebuild Pure
+// @namespace    ro-rebuild-pure
+// @version      1.0.0
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
 // @grant        none
-// @updateURL    https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-web-assist.user.js
-// @downloadURL  https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-web-assist.user.js
+// @updateURL    https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js
+// @downloadURL  https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js
 // ==/UserScript==
 
 /* ==========================================================================
@@ -123,9 +123,9 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '4.58.1';
-  const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-web-assist.user.js';
-  const CFG_STORAGE_KEY = 'roAssistConfig_v1';
+  const VERSION = '1.0.0';
+  const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
+  const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // keys ที่บันทึก/โหลด (boolean/number/array/string — ไม่เก็บ function หรือ object ซ้อน)
   const PERSIST_KEYS = [
     'healEnabled', 'healAtPercent', 'healItems', 'healMode', 'healDelayMs', 'healAtMax',
@@ -190,15 +190,15 @@
   // ============================================================
   const lastBuffUse = new Map();   // itemId → timestamp (ms) ใช้ครั้งล่าสุด
   // migration: ล้างเวลา Auto-Buff รุ่นเก่าหนึ่งครั้ง แล้วไม่นำมาใช้อีก
-  try { localStorage.removeItem('roAssistBuffTimes_v1'); } catch (e) { /* ignore */ }
+  try { localStorage.removeItem('roPureBuffTimes_v1'); } catch (e) { /* ignore */ }
 
   // ============================================================
   //  Item database (โหลดจาก GitHub raw + cache localStorage)
   // ============================================================
-  const ITEMS_CSV_URL = GITHUB_RAW.replace('/ro-rebuild-web-assist.user.js', '/items.csv');
-  const ITEMS_META_URL = GITHUB_RAW.replace('/ro-rebuild-web-assist.user.js', '/items/meta.json');
-  const ITEMS_ICON_URL = GITHUB_RAW.replace('/ro-rebuild-web-assist.user.js', '/items/small/');
-  const ITEMDB_CACHE_KEY = 'roAssistItemDB_v1';
+  const ITEMS_CSV_URL = GITHUB_RAW.replace('/ro-rebuild-pure.user.js', '/items.csv');
+  const ITEMS_META_URL = GITHUB_RAW.replace('/ro-rebuild-pure.user.js', '/items/meta.json');
+  const ITEMS_ICON_URL = GITHUB_RAW.replace('/ro-rebuild-pure.user.js', '/items/small/');
+  const ITEMDB_CACHE_KEY = 'roPureItemDB_v1';
   const itemDB = { names: {}, prices: {}, loaded: false };
   async function loadItemDB() {
     if (itemDB.loaded) return;
@@ -372,7 +372,7 @@
 
     // ---------- NAVIGATION (บันทึกเส้นทางเดิน + waypoint graph) ----------
     //  เก็บตำแหน่งที่ผู้เล่นคลิกเดิน → สร้าง waypoint graph → bot เดินตามเส้นทางจริง
-    //  ★ ข้อมูลเก็บ localStorage (roAssistNav_<map>) + export/import + sync GitHub
+    //  ★ ข้อมูลเก็บ localStorage (roPureNav_<map>) + export/import + sync GitHub
     navRecording: false,          // ★ default OFF — เปิดเพื่อบันทึกตอนเดินเก็บข้อมูล
     navMergeRadius: 3,            // จุดที่อยู่ใกล้กัน <= N ช่อง = รวมเป็น node เดียว (dedup)
     navWanderUseNav: true,        // wander ใช้ nav แทนสุ่ม (ถ้ามีข้อมูลแมปนั้น)
@@ -604,8 +604,8 @@
   //  PROFILE — ชุด config แยกตามงาน/ตัวละคร
   //  เก็บเฉพาะ CFG ที่ persist; Nav/GAT cache, log และ runtime state ใช้ร่วมกัน
   // ============================================================
-  const PROFILES_STORAGE_KEY = 'roAssistProfiles_v1';
-  const PROFILE_ACTIVE_STORAGE_KEY = 'roAssistActiveProfile_v1';
+  const PROFILES_STORAGE_KEY = 'roPureProfiles_v1';
+  const PROFILE_ACTIVE_STORAGE_KEY = 'roPureActiveProfile_v1';
   // snapshot ก่อน loadConfig: สลับ profile แล้ว key ที่ไม่มีต้องกลับ default จริง
   const CFG_DEFAULTS = JSON.parse(JSON.stringify(CFG));
   const cloneConfigValue = (value) => value == null ? value : JSON.parse(JSON.stringify(value));
@@ -5450,7 +5450,7 @@
   const lastSkillUse = new Map();        // skillId → timestamp (cooldown)
   const skillUsesOnTarget = new Map();   // skillId → Map<targetId, count> (maxUsesPerTarget)
   // persist skill times ข้าม session
-  const SKILL_TIMES_KEY = 'roAssistSkillTimes_v1';
+  const SKILL_TIMES_KEY = 'roPureSkillTimes_v1';
   function loadSkillTimes() {
     try {
       const raw = localStorage.getItem(SKILL_TIMES_KEY);
@@ -6930,7 +6930,7 @@ function abBuffTimeoutMs() {
   //  GRAT 1.2: cell ละ 20 bytes; type 0 = เดินได้, ค่าอื่น = กันเดิน/น้ำ
   //  JSON ใช้ RLE เพื่อให้ cache และการโหลด 168 แมปมีขนาดเล็กลง
   // ============================================================
-  const GAT_KEY_PREFIX = 'roAssistGat_';
+  const GAT_KEY_PREFIX = 'roPureGat_';
   // ข้อมูล GAT ทุกแมปโหลดจาก maps-gat บน GitHub แล้ว cache ใน localStorage
 
   const gatCache = new Map();       // mapName -> {w, h, cells: Uint8Array}; cells=0 คือเดินได้
@@ -6961,7 +6961,7 @@ function abBuffTimeoutMs() {
     try {
       const cached = localStorage.getItem(GAT_KEY_PREFIX + mapName);
       if (cached && gatRegister(mapName, JSON.parse(cached))) return;
-      const response = await fetch(GITHUB_RAW.replace('ro-rebuild-web-assist.user.js', 'maps-gat/' + encodeURIComponent(mapName) + '.json'));
+      const response = await fetch(GITHUB_RAW.replace('ro-rebuild-pure.user.js', 'maps-gat/' + encodeURIComponent(mapName) + '.json'));
       if (!response.ok) return;
       const data = await response.json();
       if (!gatRegister(mapName, data)) { dbg('🗺️ GAT data ไม่ถูกต้อง:', mapName); return; }
@@ -7197,11 +7197,11 @@ function abBuffTimeoutMs() {
   // ============================================================
   //  NAVIGATION — บันทึกเส้นทางเดิน + สร้าง waypoint graph
   //    Trail (ตามเวลา) → merge nodes (ใกล้กัน) + edges (เชื่อมต่อกัน)
-  //    localStorage per-map (roAssistNav_<map>) + export/import + sync GitHub
+  //    localStorage per-map (roPureNav_<map>) + export/import + sync GitHub
   // ============================================================
   // ★ flag แยก: บอทสั่งเดิน (sendMove) vs ผู้เล่นคลิกเอง — บันทึกเฉพาะผู้เล่น
   let navBotMoving = false;
-  const NAV_KEY_PREFIX = 'roAssistNav_';
+  const NAV_KEY_PREFIX = 'roPureNav_';
   // cache ของแต่ละแมปที่โหลดแล้ว: mapName → { nodes: [{x,y}], edges: [[i,j],...] }
   const navCache = new Map();
   // load nav data ของแมปจาก localStorage (cache ไว้)
@@ -9439,13 +9439,13 @@ function abBuffTimeoutMs() {
   // The detached document is rebuilt when it closes, so navigation state has
   // to live outside that document in order to survive the next open.
   const detachedSettingsViewState = { page: 'stats', subtab: 'loot' };
-  const DETACHED_SETTINGS_ZOOM_KEY = 'roAssistDetachedSettingsZoom_v1';
+  const DETACHED_SETTINGS_ZOOM_KEY = 'roPureDetachedSettingsZoom_v1';
   function openDetachedSettingsWindow(root, requestedPage = '', requestedSubtab = '') {
     const sourcePopup = root && root.querySelector('#__assist_popup');
     if (!sourcePopup) return false;
     if (detachedSettingsWindow && !detachedSettingsWindow.closed) {
-      if (typeof detachedSettingsWindow.__roAssistSelectPage === 'function') {
-        detachedSettingsWindow.__roAssistSelectPage(requestedPage, requestedSubtab);
+      if (typeof detachedSettingsWindow.__roPureSelectPage === 'function') {
+        detachedSettingsWindow.__roPureSelectPage(requestedPage, requestedSubtab);
       }
       detachedSettingsWindow.focus();
       return true;
@@ -9459,14 +9459,14 @@ function abBuffTimeoutMs() {
     detachedSettingsWindow = child;
     const copiedStyles = Array.from(document.querySelectorAll('style')).map(style => style.textContent).join('\n');
     child.document.open();
-    child.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>RO Assist Settings</title><style>${copiedStyles}
+    child.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>RO Rebuild Pure Settings</title><style>${copiedStyles}
       html,body{margin:0;background:#101217;color:#e8e8e8;font-family:'Segoe UI','Segoe UI Emoji',system-ui,sans-serif}
       body{padding:10px;min-width:390px}.settings-head{position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:8px;padding:8px 10px;margin:-10px -10px 10px;background:#15171c;border-bottom:1px solid #3a3f4b}
       .settings-head strong{color:#8ab4f8;font-size:14px;margin-right:auto}.settings-head button{background:#2a3441;border:1px solid #3a3f4b;border-radius:5px;color:#e8e8e8;padding:5px 9px;cursor:pointer}
       .settings-head button:hover{background:#34465a}#__assist_popup.detached-settings{display:flex!important;position:static!important;margin:0 auto!important;width:min(720px,100%)!important;max-height:calc(100vh - 76px)!important}
       .detached-settings .__assist_subpage{padding-bottom:12px}.detached-settings .__assist_subtabs{position:sticky;top:0;z-index:1;background:#101217;padding-top:4px}
       #settings-font-size{min-width:42px;text-align:center;color:#9aa0a6;font-variant-numeric:tabular-nums}
-    </style></head><body><div class="settings-head"><strong>⚙️ RO Assist Settings</strong><span id="settings-state">เชื่อมต่อกับเกม</span><button id="settings-font-down" title="ลดขนาดตัวอักษร">A−</button><span id="settings-font-size">115%</span><button id="settings-font-up" title="เพิ่มขนาดตัวอักษร">A+</button><button id="settings-close">ปิด</button></div><main id="settings-host"></main></body></html>`);
+    </style></head><body><div class="settings-head"><strong>⚙️ RO Rebuild Pure Settings</strong><span id="settings-state">เชื่อมต่อกับเกม</span><button id="settings-font-down" title="ลดขนาดตัวอักษร">A−</button><span id="settings-font-size">115%</span><button id="settings-font-up" title="เพิ่มขนาดตัวอักษร">A+</button><button id="settings-close">ปิด</button></div><main id="settings-host"></main></body></html>`);
     child.document.close();
 
     let zoom = 1.15;
@@ -9496,7 +9496,7 @@ function abBuffTimeoutMs() {
       view.querySelectorAll('.__assist_page').forEach(viewPage => viewPage.classList.toggle('active', viewPage.getAttribute('data-page') === wanted));
       if (wanted === 'config') setSubtab(subtab);
     };
-    child.__roAssistSelectPage = setPage;
+    child.__roPureSelectPage = setPage;
     setPage(requestedPage, requestedSubtab);
 
     // The source form refreshes from CFG continuously, but focus inside this
@@ -9809,7 +9809,7 @@ function abBuffTimeoutMs() {
       </div>
       <div id="__assist_popup">
         <div class="popup-head">
-          <strong>⚙ RO Assist</strong>
+          <strong>⚙ RO Rebuild Pure</strong>
           <button id="__assist_fontdown" title="ลดขนาดตัวอักษร">A−</button>
           <span class="zoom-value" id="__assist_fontvalue">115%</span>
           <button id="__assist_fontup" title="เพิ่มขนาดตัวอักษร">A+</button>
@@ -9821,7 +9821,7 @@ function abBuffTimeoutMs() {
         </div>
         <div class="__assist_page active" data-page="stats">
           <div class="row" style="border-bottom:2px solid #3a3f4b;">
-            <span class="k">RO Assist</span>
+            <span class="k">RO Rebuild Pure</span>
             <span class="v" data-version>v?</span>
           </div>
           <div class="row"><span class="k">HP</span><span class="v" data-hp>?</span></div>
@@ -10143,7 +10143,7 @@ function abBuffTimeoutMs() {
             <div style="font-size:10px;color:#9aa0a6;margin-top:4px;line-height:1.6">★ Profile เก็บค่า Farm / Combat / Loot / Queue / Skill / Storage / Auto Login ทั้งชุด<br>★ Nav/GAT รายแมป, log และ runtime state ใช้ร่วมกัน · สลับได้เมื่อไม่มีงานเก็บของ/คุย NPC/สู้ค้างอยู่</div>
             <h4 style="color:#e74c3c">⚠️ Reset</h4>
             <div class="btns"><button id="__assist_resetconfig" class="danger">🔄 รีเซ็ตค่าตั้งค่ากลับเป็น Default</button></div>
-            <div style="font-size:10px;color:#9aa0a6;margin-top:4px;line-height:1.5">★ ล้างเฉพาะค่าที่บันทึกใน <code>roAssistConfig_v1</code> แล้วรีเฟรชหน้า<br>★ ไม่ลบ Nav, สถิติ session, รายการไอเท็ม หรือข้อมูลของตัวเกม</div>
+            <div style="font-size:10px;color:#9aa0a6;margin-top:4px;line-height:1.5">★ ล้างเฉพาะค่าที่บันทึกใน <code>roPureConfig_v1</code> แล้วรีเฟรชหน้า<br>★ ไม่ลบ Nav, สถิติ session, รายการไอเท็ม หรือข้อมูลของตัวเกม</div>
             <h4>📤 สำรอง / ย้ายเครื่อง</h4>
             <div class="btns">
               <button id="__assist_exportall">📤 export ทั้งหมด</button>
@@ -10787,7 +10787,7 @@ function abBuffTimeoutMs() {
     root.querySelector('#__assist_tg_test').addEventListener('click', () => {
       if (!relayWs || relayWs.readyState !== 1) { updateTelegramStatus('❌ ยังไม่ได้เชื่อม relay server', '#e74c3c'); return; }
       updateTelegramStatus('⏳ กำลังส่งทดสอบ...', '#f39c12');
-      sendRelayAlert('📨 ทดสอบแจ้งเตือนจาก RO Assist — หากคุณเห็นข้อความนี้ = ใช้งานได้แล้ว!');
+      sendRelayAlert('📨 ทดสอบแจ้งเตือนจาก RO Rebuild Pure — หากคุณเห็นข้อความนี้ = ใช้งานได้แล้ว!');
       log('📨 ส่งข้อความทดสอบไป Telegram');
     });
     root.querySelector('#__assist_tg_clear').addEventListener('click', () => {
@@ -10872,7 +10872,7 @@ function abBuffTimeoutMs() {
     root.querySelector('#__assist_resetconfig').addEventListener('click', () => {
       if (!confirm('รีเซ็ตค่าตั้งค่ากลับเป็น Default?\n\nFarm, Combat, Heal, Storage, Weapon Set, Auto Login และค่าอื่นที่บันทึกไว้จะหายไป\nแต่จะไม่ลบ Nav / สถิติ / ข้อมูลเกม')) return;
       try { localStorage.removeItem(CFG_STORAGE_KEY); } catch (_) {}
-      log('🔄 ล้าง roAssistConfig_v1 แล้ว — กำลังรีเฟรชหน้า');
+      log('🔄 ล้าง roPureConfig_v1 แล้ว — กำลังรีเฟรชหน้า');
       setTimeout(() => location.reload(), 500);
     });
     // ---- farm map wires ----
@@ -10978,8 +10978,8 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
   // ★ Monitor — ส่งข้อมูลไป popup window (origin เดียวกับเกม → ไม่มีปัญหา file://)
   let monitorWin = null;   // popup window reference
   let monitorChannel = null;
-  try { monitorChannel = new BroadcastChannel('ro-assist-monitor'); } catch (_) {}
-  const MONITOR_STORAGE_KEY = 'roAssistMonitorData';
+  try { monitorChannel = new BroadcastChannel('ro-pure-monitor'); } catch (_) {}
+  const MONITOR_STORAGE_KEY = 'roPureMonitorData';
   let lastMonitorSendAt = 0;
   function openMonitor() {
     if (monitorWin && !monitorWin.closed) { monitorWin.focus(); return; }

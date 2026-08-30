@@ -4,14 +4,14 @@ Tampermonkey userscript for RO Rebuild automation.
 
 ## Source of truth
 
-Edit only `RO Rebuild Web Assist-4.57.0.js`.
+Edit only `RO Rebuild Pure.js`.
 Before committing a release, publish the Tampermonkey artifact:
 
 ```sh
 ./scripts/publish-userscript.sh
 ```
 
-`ro-rebuild-web-assist.user.js` is the generated file served to Tampermonkey.
+`ro-rebuild-pure.user.js` is the generated file served to Tampermonkey.
 
 ## Required hosted assets
 
