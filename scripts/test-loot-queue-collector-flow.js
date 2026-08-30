@@ -1,0 +1,40 @@
+#!/usr/bin/env node
+'use strict';
+
+// Collector owns one job and one outstanding pickup command at a time.  This
+// locks the intended ordering: city-only claim delay, post-warp pickup,
+// immediate happy-path chaining, and delayed next claim only after discard.
+const fs = require('fs');
+const assert = require('assert');
+
+const source = fs.readFileSync('RO Rebuild Pure.js', 'utf8');
+const published = fs.readFileSync('ro-rebuild-pure.user.js', 'utf8');
+
+assert.strictEqual(published, source, 'published userscript must match the source copy');
+assert.match(source, /lootQueueClaimDelayMs: 5000, \/\/ รอก่อนออกจากจุดรอ\/เมืองเพื่อรวม drop/);
+assert.match(source, /lootQueueNearbySettleMs: 1000, \/\/ ทิ้งงานแล้วรอก่อนหา job ถัดไป/);
+assert.match(source, /lootQueuePickupRetryCount: 2, \/\/ server ตอบ FAIL\/เงียบหลังวาร์ป/);
+assert.match(source, /const delayMs = \(!replacingSettledJob && !sameMap && currentMap === CFG\.lootQueueHomeMap\) \? claimDelayMs\(\) : 0;/,
+  'claim delay must apply only from the configured home map when a warp is needed');
+assert.match(source, /done\.settleUntil = nowMs\(\);[\s\S]{0,160}เก็บสำเร็จ → มอง job คิวถัดไปทันที/,
+  'a successful pickup must chain immediately');
+assert.match(source, /const pickupResponseWaitMs = \(\) => \{[\s\S]{0,180}CFG\.lootQueueActionTimeoutMs[\s\S]{0,180}\};/,
+  'the configured pickup response wait must control each attempt');
+assert.match(source, /pickupResponseDueAt = now \+ pickupResponseWaitMs\(\);/,
+  'each pickup attempt must use the configured response wait');
+assert.match(source, /รอผล pickup แต่ละครั้ง \(ms\) — ครบเวลาแล้ว retry; retry ครบจึงทิ้งงาน/,
+  'the UI must describe the configured per-attempt response wait');
+assert.match(source, /activeJob\.waitingPickupResult = true;/,
+  'only one pickup command may be awaiting its result');
+assert.match(source, /if \(activeJob\.waitingPickupResult\) \{[\s\S]{0,320}return;/,
+  'collector must wait for a pickup result before retrying');
+assert.match(source, /if \(attempts >= 1 \+ limit\) \{[\s\S]{0,160}discardActive\('server ตอบ pickup FAIL ครบ '/,
+  'discard happens only after the configured retries are exhausted');
+assert.match(source, /nextClaimAt = nowMs\(\) \+ failureNextJobDelayMs\(\);/,
+  'discard must delay the next claim');
+assert.match(source, /if \(nowMs\(\) < nextClaimAt\) return;/,
+  'the next-job delay must gate all collector claims');
+assert.match(source, /onPickupTakenByOther\(dropId\)/,
+  'a confirmed pickup by another entity must retire the stale collector job');
+
+console.log('loot-queue-collector-flow regression: PASS');

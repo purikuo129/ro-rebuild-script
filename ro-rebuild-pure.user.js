@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.0.4
+// @version      1.1.0
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -124,15 +124,18 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.0.4';
+  const VERSION = '1.1.0';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
+  // Master switch is intentionally not part of a Profile/export.  Moving a
+  // profile to another machine must never silently start its automation.
+  const MASTER_BOT_STORAGE_KEY = 'roPureMasterBotEnabled_v1';
   // keys ที่บันทึก/โหลด (boolean/number/array/string — ไม่เก็บ function หรือ object ซ้อน)
   const PERSIST_KEYS = [
     'healEnabled', 'healAtPercent', 'healItems', 'healMode', 'healDelayMs', 'healAtMax',
     'buffEnabled', 'buffItems', 'buffRebuffDelayMs', 'autoClearConsoleMin', 'monitorServerEnabled', 'monitorServerUrl', 'monitorSendIntervalMs',
     'skillEnabled', 'skills', 'disabledSkillIds',
-    'lootEnabled', 'lootDelayAfterDropMs', 'lootPostKillSettleMs', 'lootUseKillPos', 'pickRadiusKill', 'filter', 'sendThrottleMs', 'lootQueueRole', 'lootQueueUrl', 'lootQueueTransport', 'lootQueueLocalUrl', 'lootQueueCloudflareUrl', 'lootQueueGroup', 'lootQueueHomeMap', 'lootQueueHomeX', 'lootQueueHomeY', 'lootQueueItemIds', 'lootQueueClaimDelayMs', 'lootQueueNearbySettleMs', 'lootQueueActionTimeoutMs', 'lootQueueWarpCooldownMs', 'lootQueuePickupRetryCount',
+    'lootEnabled', 'lootDelayAfterDropMs', 'lootPostKillSettleMs', 'lootUseKillPos', 'pickRadiusKill', 'filter', 'sendThrottleMs', 'lootQueueRole', 'lootQueueUrl', 'lootQueueTransport', 'lootQueueLocalUrl', 'lootQueueCloudflareUrl', 'lootQueueGroup', 'lootQueueHomeMap', 'lootQueueHomeX', 'lootQueueHomeY', 'lootQueueItemIds', 'lootQueueSendAll', 'lootQueueClaimDelayMs', 'lootQueueNearbySettleMs', 'lootQueueActionTimeoutMs', 'lootQueueWarpCooldownMs', 'lootQueuePickupRetryCount',
     'warpLootEnabled',
     'combatEnabled', 'targetWhitelist', 'targetBlacklist', 'attackRange', 'rangedAttackRange', 'attackProbeMs', 'hiddenWaitMonsters', 'hiddenWaitSec', 'hiddenSightEnabled',
     'maxAcquireDistance', 'searchRadii', 'maxChaseDistance', 'antiKS', 'antiKSCooldownMs', 'avoidOtherPlayers', 'playerProximityRadius', 'postWarpTargetSettleMs', 'combatGatProgressTimeoutMs', 'targetLowestHpFirst',
@@ -141,7 +144,7 @@
     'wanderEnabled', 'warpFindEnabled', 'noMonsterWarpSec', 'warpToMonster', 'warpToMonsterMaxPerEntity', 'stuckWarpOnAbandon', 'warpToBoss',
     'restEnabled', 'restHpPercent', 'restUntilPercent', 'restMaxSec', 'postCombatDelayMs', 'autoRespawnEnabled', 'autoRespawnDelayMs', 'telegramAlertCard', 'telegramAlertFlee', 'telegramAlertBotMention', 'telegramAlertNearby', 'telegramAlertWhisper', 'telegramBotToken', 'telegramChatId',
     'sellEnabled', 'sellNpcName', 'sellNpcMap', 'sellNpcX', 'sellNpcY', 'sellIntervalMin', 'sellOnFull', 'sellItemIds',
-    'storageEnabled', 'kafraName', 'kafraMap', 'kafraMapX', 'kafraMapY', 'kafraChoice', 'depositOnFull', 'depositWeightPercent', 'depositAfterSell', 'depositItemIds', 'storageReserveItems',
+    'storageEnabled', 'kafraName', 'kafraMap', 'kafraMapX', 'kafraMapY', 'kafraChoice', 'depositOnFull', 'depositWeightPercent', 'depositAfterSell', 'storageDepositMode', 'depositItemIds', 'storageReserveItems',
     'oreRefineMap', 'oreRefineHubX', 'oreRefineHubY', 'oreRefineKafraName', 'oreRefineKafraX', 'oreRefineKafraY', 'oreRefineKafraChoice', 'oreRefineKafraNextCount', 'oreRefineNpcName', 'oreRefineNpcX', 'oreRefineNpcY', 'oreRefineTradeChoice', 'oreRefineTradeEntry', 'oreRefineSellChoice', 'oreRefineBatchSize', 'oreRefineSourceItemId', 'oreRefineResultItemId',
     'farmMap', 'farmMapX', 'farmMapY', 'warpBackToFarm',
     'abBuffEnabled', 'abBuffMap', 'abBuffX', 'abBuffY', 'abBuffCommandIntervalMs', 'abBuffReturnDelayMs', 'abBuffTimeoutSec',
@@ -166,15 +169,26 @@
   function saveConfig() {
     try {
       localStorage.setItem(CFG_STORAGE_KEY, JSON.stringify(persistedConfig()));
-    } catch (e) { /* localStorage อาจถูกบล็อก — ข้าม */ }
+      return true;
+    } catch (e) { return false; } // localStorage อาจถูกบล็อก/เต็ม
+  }
+  function applyPersistedConfig(saved) {
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return 0;
+    let count = 0;
+    for (const k of PERSIST_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(saved, k)) continue;
+      CFG[k] = cloneConfigValue(saved[k]);
+      count++;
+    }
+    return count;
   }
   function loadConfig() {
     try {
       const raw = localStorage.getItem(CFG_STORAGE_KEY);
       if (!raw) return;
       const saved = JSON.parse(raw);
-      for (const k of PERSIST_KEYS) if (k in saved) CFG[k] = saved[k];
-      log('💾 โหลดค่าที่บันทึกไว้จากเครื่อง (' + PERSIST_KEYS.filter(k => k in saved).length + ' รายการ)');
+      const count = applyPersistedConfig(saved);
+      log('💾 โหลดค่าที่บันทึกไว้จากเครื่อง (' + count + ' รายการ)');
     } catch (e) { /* parse fail — ใช้ default */ }
   }
   // debounce save (กันเขียนถี่เกินไป)
@@ -429,8 +443,10 @@
     depositOnFull: true,          // ฝากเมื่อ server แจ้งเต็ม หรือ น้ำหนักถึง depositWeightPercent
     depositWeightPercent: 90,     // น้ำหนักถึง N% → เริ่มไปฝาก (0 = ปิด trigger น้ำหนัก)
     depositAfterSell: true,       // ★ chain: ฝากต่อทันทีหลังขายเสร็จ
-    depositItemIds: [],           // ★ item id ที่จะฝาก (default ว่าง = ไม่ฝากอะไร)
-    // หลังฝากแล้วหยิบกลับจนมีติดตัวตามจำนวนนี้; เช่น [{itemId:509, amount:50}]
+    // all = default: ฝากทุกอย่างที่ไม่ใช่อุปกรณ์สวม/Weapon Set, selected = ใช้รายการด้านล่าง
+    storageDepositMode: 'all',
+    depositItemIds: [],           // ใช้เมื่อ storageDepositMode='selected'
+    // กันยอดติดตัวขั้นต่ำก่อนฝาก; เช่น [{itemId:509, amount:50}]
     storageReserveItems: [{ itemId: 509, amount: 50 }, { itemId: 656, amount: 10 }],
 
     // ---------- ORE REFINE + SELL (manual tool) ----------
@@ -500,11 +516,12 @@
     lootQueueHomeX: -999,
     lootQueueHomeY: -999,
     lootQueueItemIds: [],        // item ที่ให้ไอดีฟาร์มส่งต่อไป collector
-    lootQueueClaimDelayMs: 5000, // หลังรับงานแรก รอรวม drop ใกล้กันก่อนวาร์ป (0=ทันที)
-    lootQueueNearbySettleMs: 1000, // เก็บสำเร็จแล้วรอ job ถัดไปเข้าคิว (0=ทันที)
-    lootQueueActionTimeoutMs: 5000, // ไม่มีตำแหน่ง/ผล pickup ภายในนี้ → ทิ้งงาน (ms)
+    lootQueueSendAll: false,     // farm only: ส่งทุก drop โดยไม่ต้องอยู่ในรายการพิเศษ
+    lootQueueClaimDelayMs: 5000, // รอก่อนออกจากจุดรอ/เมืองเพื่อรวม drop (0=ทันที)
+    lootQueueNearbySettleMs: 1000, // ทิ้งงานแล้วรอก่อนหา job ถัดไป (0=ทันที)
+    lootQueueActionTimeoutMs: 1000, // รอผลของ pickup แต่ละครั้งก่อน retry/ทิ้งงาน (ms)
     lootQueueWarpCooldownMs: 0, // ดีเลย์ก่อนวาร์ป job ถัดไป (0=ทันที); WARP_CONFIRM ยังกันคำสั่งซ้ำของ job เดิม
-    lootQueuePickupRetryCount: 3, // server ตอบ FAIL/เงียบหลังวาร์ป → retry เพิ่มหลังคำสั่งแรกกี่ครั้ง
+    lootQueuePickupRetryCount: 2, // server ตอบ FAIL/เงียบหลังวาร์ป → retry เพิ่มหลังคำสั่งแรกกี่ครั้ง
 
     // ---------- WARP-TO-LOOT (ฟีเจอร์รุนแรง — default OFF) ----------
     //  เมื่อเก็บของไม่ได้ครบ maxAttempts (server เงียบ = ติดกำแพง/หน้าผา)
@@ -613,7 +630,11 @@
   function loadProfilesStore() {
     try {
       const parsed = JSON.parse(localStorage.getItem(PROFILES_STORAGE_KEY));
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+      let migrated = false;
+      for (const snapshot of Object.values(parsed)) migrated = normalizeStorageDepositMode(snapshot) || migrated;
+      if (migrated) localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(parsed));
+      return parsed;
     } catch (_) { return {}; }
   }
   function saveProfilesStore(profiles) {
@@ -637,6 +658,71 @@
     return value;
   }
   function profileSnapshot() { return cloneConfigValue(persistedConfig()); }
+  function normalizeProfilesPayload(rawProfiles) {
+    if (!rawProfiles || typeof rawProfiles !== 'object' || Array.isArray(rawProfiles)) return {};
+    const clean = {};
+    for (const [rawName, snapshot] of Object.entries(rawProfiles)) {
+      const name = normalizeProfileName(rawName);
+      if (!name || !snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) continue;
+      clean[name] = {};
+      for (const key of PERSIST_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(snapshot, key)) clean[name][key] = cloneConfigValue(snapshot[key]);
+      }
+      normalizeStorageDepositMode(clean[name]);
+    }
+    return clean;
+  }
+  function shouldMigrateNoMonsterWarpDefault(data) {
+    const version = String(data && data._version || '').trim();
+    // v4.x คือ userscript ต้นทางก่อนชื่อ Pure; v1.0.0–1.0.4 ยังมี default เก่า 5s.
+    if (/^4\./.test(version)) return true;
+    const match = version.match(/^1\.0\.(\d+)$/);
+    return !!match && Number(match[1]) < 5;
+  }
+  function migrateNoMonsterWarpDefault(data, config) {
+    if (!shouldMigrateNoMonsterWarpDefault(data) || !config) return false;
+    if (Number(config.noMonsterWarpSec) !== 5) return false;
+    config.noMonsterWarpSec = 2;
+    return true;
+  }
+  // Storage รุ่นก่อน 1.1.0 ไม่มี mode. ถ้าเคยเลือกรายการฝากไว้แล้ว
+  // ให้คงเจตนาเดิมเป็น selected; รายการว่างจึงเปลี่ยนเป็น all.
+  function normalizeStorageDepositMode(config) {
+    if (!config || typeof config !== 'object') return false;
+    if (config.storageDepositMode === 'all' || config.storageDepositMode === 'selected') return false;
+    config.storageDepositMode = Array.isArray(config.depositItemIds) && config.depositItemIds.length ? 'selected' : 'all';
+    return true;
+  }
+  // Import เก่าบางรุ่นมี config ไม่ครบ แต่มีค่าเต็มอยู่ใน active profile.
+  // profile เติมเฉพาะ key ที่หาย ส่วน config สดจากเครื่องต้นทางต้องมีสิทธิ์ทับเสมอ.
+  function buildImportConfig(data, importedProfiles, requestedActive) {
+    const merged = {};
+    const activeSnapshot = requestedActive && importedProfiles[requestedActive];
+    if (activeSnapshot && typeof activeSnapshot === 'object') {
+      for (const key of PERSIST_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(activeSnapshot, key)) merged[key] = cloneConfigValue(activeSnapshot[key]);
+      }
+    }
+    if (data.config && typeof data.config === 'object' && !Array.isArray(data.config)) {
+      for (const key of PERSIST_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(data.config, key)) merged[key] = cloneConfigValue(data.config[key]);
+      }
+    }
+    migrateNoMonsterWarpDefault(data, merged);
+    normalizeStorageDepositMode(merged);
+    return merged;
+  }
+  function backupQueueSummary(data) {
+    const countItems = (config) => Array.isArray(config && config.lootQueueItemIds) ? config.lootQueueItemIds.length : 0;
+    const profiles = data && data.profiles && typeof data.profiles === 'object' ? data.profiles : {};
+    return {
+      configKeys: data && data.config && typeof data.config === 'object' ? Object.keys(data.config).length : 0,
+      configQueueItems: countItems(data && data.config),
+      profileCount: Object.keys(profiles).length,
+      profileQueueItems: Object.fromEntries(Object.entries(profiles).map(([name, config]) => [name, countItems(config)])),
+      activeProfile: data && data.activeProfile || 'default',
+    };
+  }
   function profileNames() {
     const active = activeProfileName();
     const names = Object.keys(loadProfilesStore());
@@ -646,6 +732,30 @@
 
   // ★ โหลดค่าที่บันทึกไว้จาก localStorage (ทับ default)
   loadConfig();
+  if (normalizeStorageDepositMode(CFG)) saveConfig();
+  // Master Bot is a deep module: every autonomous loop only checks enabled(),
+  // while release/reset behaviour is owned here through one pause handler.
+  // Packet decoding and explicit manual buttons are deliberately outside it.
+  const masterBot = (() => {
+    let isEnabled = true;
+    let handlers = { pause: null, resume: null };
+    try { isEnabled = localStorage.getItem(MASTER_BOT_STORAGE_KEY) !== '0'; } catch (_) {}
+    const persist = () => { try { localStorage.setItem(MASTER_BOT_STORAGE_KEY, isEnabled ? '1' : '0'); } catch (_) {} };
+    return {
+      enabled() { return isEnabled; },
+      setEnabled(next) {
+        next = !!next;
+        if (isEnabled === next) return isEnabled;
+        isEnabled = next;
+        persist();
+        try { (next ? handlers.resume : handlers.pause)?.(); } catch (error) { log('⚠️ Master Bot transition:', error.message); }
+        log(next ? '⏻ Master Bot: ON — กลับมาทำ automation ตามค่ารายระบบ' : '⏻ Master Bot: PAUSED — หยุด automation ทั้งหมด');
+        return isEnabled;
+      },
+      setHandlers(nextHandlers) { handlers = { ...handlers, ...(nextHandlers || {}) }; },
+      status() { return { enabled: isEnabled, label: isEnabled ? 'ON' : 'PAUSED' }; },
+    };
+  })();
   // เปลี่ยนค่าเริ่มต้น 5s → 2s เพียงครั้งเดียว; ไม่ทับคนที่ตั้งค่าอื่นเอง.
   try {
     const migrationKey = 'roPureNoMonsterWarpDefaultV2';
@@ -708,6 +818,7 @@
   let lastGamePacketAt = Date.now();
   let wsOpenedAt = 0;
   let autoRefreshScheduled = false;
+  let autoRefreshTimer = null;
   function autoRefreshMovementStallMs() {
     const sec = Number(CFG.autoRefreshMovementStallSec);
     return Number.isFinite(sec) ? Math.max(0, Math.min(3600, Math.round(sec))) * 1000 : 600000;
@@ -811,7 +922,7 @@
   }
 
   // ============================================================
-  //  FPS CAP — จำกัดเฉพาะ requestAnimationFrame ของหน้าเกม
+  //  FPS CAP — จำกัด requestAnimationFrame หลัง Unity boot สำเร็จเท่านั้น
   //  - ส่ง callback ที่รอในรอบเดียวกันทั้งหมด เพื่อรักษา semantics ของ rAF
   //  - ไม่แตะ setInterval/setTimeout/WebSocket: bot loop ยังทำงานตามเวลาปกติ
   //  - 0 = native rAF (ไม่จำกัด); ค่าอื่นผ่าน whitelist เท่านั้น
@@ -918,8 +1029,98 @@
     };
   };
   const fpsCap = createFpsCap();
-  const initialFpsCap = fpsCap.set(CFG.renderFpsCap);
-  CFG.renderFpsCap = initialFpsCap == null ? 0 : initialFpsCap;
+  // Unity ใช้ requestAnimationFrame ระหว่างโหลด/compile WASM ด้วย จึงห้าม
+  // patch มันตั้งแต่ document-start แม้ผู้ใช้เคยเลือก FPS cap ไว้. รอจน
+  // loading bar แสดงแล้วถูกซ่อน (createUnityInstance สำเร็จ) ก่อนค่อยเปิด.
+  let unityBootCompleted = false;
+  // การเปลี่ยนแมปใช้ Unity main loop เพื่อคลาย/activate scene จึงปลด cap
+  // ก่อนส่ง warp ข้ามแมป และคืนเมื่อ MAP_NAME ของแมปใหม่เข้ามาแล้ว 3 วินาที.
+  const MAP_LOAD_CAP_SETTLE_MS = 3000;
+  const MAP_LOAD_CAP_MAX_SUSPEND_MS = 15000;
+  let fpsCapMapLoadActive = false;
+  let fpsCapMapRestoreTimer = null;
+  let fpsCapMapRestoreAt = 0;
+  function clearFpsCapMapRestoreTimer() {
+    if (fpsCapMapRestoreTimer) clearTimeout(fpsCapMapRestoreTimer);
+    fpsCapMapRestoreTimer = null;
+    fpsCapMapRestoreAt = 0;
+  }
+  function resumeFpsCapAfterMapLoad() {
+    clearFpsCapMapRestoreTimer();
+    if (!fpsCapMapLoadActive) return;
+    fpsCapMapLoadActive = false;
+    setConfiguredFpsCap(CFG.renderFpsCap);
+  }
+  function scheduleFpsCapAfterMapLoad(delayMs) {
+    clearFpsCapMapRestoreTimer();
+    fpsCapMapRestoreAt = Date.now() + delayMs;
+    fpsCapMapRestoreTimer = setTimeout(resumeFpsCapAfterMapLoad, delayMs);
+  }
+  function suspendFpsCapForMapLoad() {
+    if (!unityBootCompleted || !CFG.renderFpsCap) return false;
+    fpsCapMapLoadActive = true;
+    fpsCap.set(0);
+    // เผื่อ server ไม่ยืนยัน MAP_NAME หรือวาร์ปถูกปฏิเสธ: ห้ามปลด cap ค้างถาวร.
+    scheduleFpsCapAfterMapLoad(MAP_LOAD_CAP_MAX_SUSPEND_MS);
+    return true;
+  }
+  function settleFpsCapAfterMapLoad() {
+    if (!unityBootCompleted || !CFG.renderFpsCap) return false;
+    // Server-forced map changes may not have an outgoing 0x40 for us to see.
+    // We cannot release before that scene starts, but still keep the new map's
+    // spawn/activation frames uncapped once MAP_NAME confirms the transition.
+    if (!fpsCapMapLoadActive) {
+      fpsCapMapLoadActive = true;
+      fpsCap.set(0);
+    }
+    scheduleFpsCapAfterMapLoad(MAP_LOAD_CAP_SETTLE_MS);
+    return true;
+  }
+  function setConfiguredFpsCap(value) {
+    const fps = Number(value);
+    if (!FPS_CAP_OPTIONS.includes(fps)) {
+      CFG.renderFpsCap = 0;
+      if (unityBootCompleted) fpsCap.set(0);
+      return null;
+    }
+    CFG.renderFpsCap = fps;
+    if (unityBootCompleted && !fpsCapMapLoadActive) fpsCap.set(fps);
+    return fps;
+  }
+  function completeUnityBoot() {
+    if (unityBootCompleted) return;
+    unityBootCompleted = true;
+    setConfiguredFpsCap(CFG.renderFpsCap);
+  }
+  function armFpsCapAfterUnityBoot() {
+    let loadingBarSeenVisible = false;
+    let barObserver = null;
+    const bindLoadingBar = () => {
+      const loadingBar = document.querySelector('#unity-loading-bar');
+      if (!loadingBar) return false;
+      const check = () => {
+        const visible = window.getComputedStyle(loadingBar).display !== 'none';
+        if (visible) loadingBarSeenVisible = true;
+        if (!loadingBarSeenVisible || visible) return;
+        if (barObserver) barObserver.disconnect();
+        completeUnityBoot();
+      };
+      if (typeof MutationObserver === 'function') {
+        barObserver = new MutationObserver(check);
+        barObserver.observe(loadingBar, { attributes: true, attributeFilter: ['style', 'class'] });
+      }
+      check();
+      return true;
+    };
+    if (bindLoadingBar() || typeof MutationObserver !== 'function') return;
+    const documentObserver = new MutationObserver(() => {
+      if (!bindLoadingBar()) return;
+      documentObserver.disconnect();
+    });
+    documentObserver.observe(document, { childList: true, subtree: true });
+  }
+  setConfiguredFpsCap(CFG.renderFpsCap);
+  armFpsCapAfterUnityBoot();
 
   // ★ chat history buffer — เก็บแชทล่าสุดสำหรับ monitor
   const CHAT_BUF_MAX = 50;
@@ -1138,7 +1339,7 @@
     CFG.sellItemIds = CFG.sellItemIds.filter(x => x !== id);
     CFG.depositItemIds = CFG.depositItemIds.filter(x => x !== id);
     if (cur === 'keep') { CFG.sellItemIds.push(id); log('💰', nameOf(id), '→ ขาย'); }
-    else if (cur === 'sell') { CFG.depositItemIds.push(id); log('🏦', nameOf(id), '→ ฝาก'); }
+    else if (cur === 'sell') { CFG.depositItemIds.push(id); CFG.storageDepositMode = 'selected'; log('🏦', nameOf(id), '→ ฝากเฉพาะรายการ'); }
     else { log('📦', nameOf(id), '→ เก็บ'); }
     return getItemAction(id);
   }
@@ -1302,6 +1503,7 @@
 
   // ตัวเช็ค HP และใช้ยา
   const healLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!CFG.healEnabled) return;
     if (isAbBuffActive()) return;
     // ห้ามคำสั่งใช้ยาไปทับ dialog/packet ของ NPC ระหว่างขายหรือฝากของ
@@ -1377,6 +1579,7 @@
   //    แต่ละ item มี intervalMin ของตัวเอง → ใช้ซ้ำเมื่อครบเวลาใน session นี้
   // ============================================================
   const buffLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!CFG.buffEnabled) return;
     if (isAbBuffActive()) return;
     if (!CFG.buffItems || !CFG.buffItems.length) return;
@@ -1602,6 +1805,7 @@
 
       // clear state เฉพาะเมื่อส่ง packet จริง ไม่ใช่แค่ caller ขอวาร์ประหว่าง hold.
       clearWarpState();
+      if (crossMap) suspendFpsCapForMapLoad();
       sendTeleportPacket(next.map, next.x, next.y);
       startTeleportGuard();
       if (crossMap) lastCrossMapSentAt = now;
@@ -1742,6 +1946,7 @@
     };
     return {
       connect,
+      close() { close(); },
       reconnect(nextHandlers) { close(); reconnectAt = 0; return connect(nextHandlers); },
       send(message) {
         if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -1776,6 +1981,7 @@
     let homeReturn = null; // { requestedAt, attempts, retryAt, fromMap } — รอ MAP_NAME/พิกัดยืนยันการกลับจุดรอ
     let claimPendingId = null, claimPendingAt = 0, lastClaimRttMs = null;
     let idleReturnAt = 0;
+    let nextClaimAt = 0;
     const pendingOffers = new Map();
     const availableJobs = new Map(); // งาน open ที่มาถึงระหว่าง collector กำลังเก็บชิ้นก่อนหน้า
     const clientId = 'assist-' + Math.random().toString(36).slice(2, 10);
@@ -1786,13 +1992,22 @@
     // ก่อน pickup เพื่อไม่ยิง packet ใน frame เดียวกับ MAP_NAME. ไม่เกี่ยวกับ timeout ของ item.
     const postWarpPickupReadyMs = () => lootQueueTransportMode() === 'cloudflare' ? 500 : 0;
     const special = (itemId) => Array.isArray(CFG.lootQueueItemIds) && CFG.lootQueueItemIds.includes(itemId);
+    // Farmer-only decision seam. The selected list remains intact while
+    // send-all is ON, so disabling it restores the old behaviour immediately.
+    function shouldOfferLootQueueItem(itemId) {
+      return role() === 'farm' && (CFG.lootQueueSendAll || special(itemId));
+    }
     const claimDelayMs = () => {
       const delay = Number(CFG.lootQueueClaimDelayMs);
       return Number.isFinite(delay) ? Math.max(0, Math.min(30000, Math.round(delay))) : 5000;
     };
-    const nearbySettleMs = () => {
+    const failureNextJobDelayMs = () => {
       const delay = Number(CFG.lootQueueNearbySettleMs);
       return Number.isFinite(delay) ? Math.max(0, Math.min(10000, Math.round(delay))) : 1000;
+    };
+    const pickupResponseWaitMs = () => {
+      const delay = Number(CFG.lootQueueActionTimeoutMs);
+      return Number.isFinite(delay) ? Math.max(1000, Math.min(30000, Math.round(delay))) : 1000;
     };
     const warpCooldownMs = () => {
       const delay = Number(CFG.lootQueueWarpCooldownMs);
@@ -1800,7 +2015,7 @@
     };
     const pickupRetryCount = () => {
       const count = Number(CFG.lootQueuePickupRetryCount);
-      return Number.isFinite(count) ? Math.max(0, Math.min(5, Math.round(count))) : 3;
+      return Number.isFinite(count) ? Math.max(0, Math.min(5, Math.round(count))) : 2;
     };
     const send = (message) => lootQueueTransport.send(message);
     const sendHello = () => send({ type: 'hello', role: role(), group: CFG.lootQueueGroup || 'default', clientId });
@@ -1811,7 +2026,7 @@
     };
     const jobsFrom = (message) => message.job ? [message.job] : (Array.isArray(message.jobs) ? message.jobs : []);
     const claim = (job) => {
-      if (!job || claimPendingId || !collectorGameReady() || !send({ type: 'claim', id: job.id })) return false;
+      if (!job || claimPendingId || nowMs() < nextClaimAt || !collectorGameReady() || !send({ type: 'claim', id: job.id })) return false;
       claimPendingId = job.id;
       claimPendingAt = nowMs();
       idleReturnAt = 0;
@@ -1837,6 +2052,7 @@
       }
     };
     const onTransportMessage = (raw) => {
+      if (!masterBot.enabled()) return;
       let message; try { message = JSON.parse(raw); } catch (_) { return; }
       if (message.type === 'available' && role() === 'collector') {
         for (const job of jobsFrom(message)) if (job && job.id) availableJobs.set(job.id, job);
@@ -1855,7 +2071,9 @@
         // อยู่แมปเดียวกับ drop แล้วไม่ต้องรอรวมงาน: ส่ง pickup รอบ tick ถัดไปทันที
         // ส่วนงานข้ามแมปยังรอตามค่า UI เพื่อให้ฟาร์มมีเวลาส่ง drop ใกล้กันเข้าคิว
         const sameMap = currentMap === message.job.map;
-        const delayMs = (replacingSettledJob || sameMap) ? 0 : claimDelayMs();
+        // รอรวม drop เฉพาะตอน collector อยู่จุดรอ/เมืองและต้องวาร์ปข้ามแมป.
+        // งานที่ chain จากการเก็บสำเร็จ หรือรับระหว่างอยู่แมปอื่น ต้องเดินต่อทันที.
+        const delayMs = (!replacingSettledJob && !sameMap && currentMap === CFG.lootQueueHomeMap) ? claimDelayMs() : 0;
         activeJob = { job: message.job, claimToken: message.claimToken, pickupAt: 0, claimDelayUntil: claimedAt + delayMs, stage: '', warpAttempts: 0, warpRequestedAt: 0, forceRandomWarp: false, crossMapExactTarget: false };
         log('📮 Loot Queue: รับงาน', message.job.itemName, '@', message.job.map, '(' + Math.round(message.job.x) + ',' + Math.round(message.job.y) + ')');
         if (lastClaimRttMs != null && lootQueueTransportMode() === 'cloudflare') log('📮 Loot Queue: Cloudflare claim RTT', lastClaimRttMs + 'ms');
@@ -1940,8 +2158,9 @@
       log('🚫 Loot Queue: ทิ้ง', stale.job.itemName, '—', reason);
       activeJob = null;
       claimPendingId = null;
-      // เปิดช่วงสั้น ๆ ให้ server ส่งงาน open ชิ้นถัดไปก่อนค่อยกลับจุดรอ
-      idleReturnAt = nowMs() + 500;
+      // FAIL ครบแล้วจึงทิ้ง job นี้; เว้นช่วงเดียวก่อน claim งานใหม่หรือกลับจุดรอ.
+      nextClaimAt = nowMs() + failureNextJobDelayMs();
+      idleReturnAt = nextClaimAt;
       return true;
     };
     // กระเป๋าเต็มจริง: ห้าม discard เพราะ drop อาจยังอยู่บนพื้น ให้ปล่อยกลับเป็น open job
@@ -1952,6 +2171,7 @@
       activeJob = null;
       claimPendingId = null;
       idleReturnAt = 0;
+      nextClaimAt = 0;
       if (stale.settleUntil) {
         log('🏦 Loot Queue: งานก่อนหน้าจบแล้ว → ไปฝากของ');
         return true;
@@ -1962,10 +2182,10 @@
     };
     return {
       isSpecial: special,
-      handlesSpecial: (itemId) => role() !== 'off' && special(itemId),
+      handlesSpecial: (itemId) => role() !== 'off' && (role() === 'farm' ? shouldOfferLootQueueItem(itemId) : (CFG.lootQueueSendAll || special(itemId))),
       isCollectorBusy: () => role() === 'collector' && !!activeJob,
       // ระหว่าง claim/รอเลือกงาน/วาร์ปกลับ ห้าม warp-back-to-farm แทรก flow ของ collector
-      isCollectorActive: () => role() === 'collector' && (!!activeJob || !!homeReturn || !!claimPendingId || idleReturnAt > nowMs()),
+      isCollectorActive: () => role() === 'collector' && (!!activeJob || !!homeReturn || !!claimPendingId || nextClaimAt > nowMs() || idleReturnAt > nowMs()),
       // Profile ต้องไม่เปลี่ยน endpoint/role ระหว่างยังถือ claim หรือยังมี offer รอส่ง
       isProfileBusy: () => !!activeJob || !!homeReturn || !!claimPendingId || pendingOffers.size > 0,
       skipCurrent() {
@@ -1976,7 +2196,7 @@
         return discardActive('ผู้ใช้กดข้ามงาน (drop หาย/บอทค้าง)');
       },
       offer(drop) {
-        if (role() !== 'farm' || !special(drop.itemId)) return false;
+        if (!masterBot.enabled() || role() !== 'farm' || !shouldOfferLootQueueItem(drop.itemId)) return false;
         const record = { key: `${CFG.lootQueueGroup || 'default'}:${currentMap || ''}:${drop.dropId}`, dropId: drop.dropId, itemId: drop.itemId, itemName: nameOf(drop.itemId), map: currentMap, x: drop.x, y: drop.y, offerAt: 0 };
         if (!record.map) return true;
         pendingOffers.set(record.key, record);
@@ -1988,27 +2208,32 @@
         if (!activeJob || activeJob.job.dropId !== dropId) return null;
         const done = activeJob;
         send({ type: 'ack', id: done.job.id, claimToken: done.claimToken });
-        const delayMs = nearbySettleMs();
-        done.settleUntil = nowMs() + delayMs;
-        log('📮 Loot Queue: เก็บสำเร็จ → รอ ' + (delayMs / 1000).toFixed(1) + 's หา job คิวถัดไป', done.job.itemName);
+        // Happy path ต้องมองงานถัดไปทันที เพื่อใช้ nextOpenJob() เลือกแมป/ระยะที่เหมาะที่สุด.
+        done.settleUntil = nowMs();
+        log('📮 Loot Queue: เก็บสำเร็จ → มอง job คิวถัดไปทันที', done.job.itemName);
         return done.job;
       },
-      // 0x52 FAIL ไม่มี picker id จึงยืนยันจาก active job + pickup ที่เราส่งเท่านั้น.
-      // ทำให้ collector ไม่เข้าใจ FAIL ว่า "เงียบ" แล้วทิ้งงานเพราะ action timeout.
+      // 0x52 FAIL ไม่มีเลข attempt จึงรับผลได้เฉพาะเมื่อยังรอคำสั่ง pickup เดียวอยู่.
+      // การ serialize นี้กัน FAIL เก่ามาตัดสิน retry ใหม่ของ collector เอง.
       onPickupFail(dropId) {
-        if (!activeJob || activeJob.settleUntil || activeJob.job.dropId !== dropId || !activeJob.pickupAt) return false;
+        if (!activeJob || activeJob.settleUntil || activeJob.job.dropId !== dropId || !activeJob.waitingPickupResult) return false;
         const now = nowMs();
-        const retries = activeJob.pickupRetries || 0;
+        activeJob.waitingPickupResult = false;
+        const attempts = activeJob.pickupAttempts || 0;
         const limit = pickupRetryCount();
         activeJob.lastActionAt = now; // server ตอบแล้ว จึงไม่ใช่ timeout แบบไม่มี action
-        if (retries >= limit) {
+        if (attempts >= 1 + limit) {
           discardActive('server ตอบ pickup FAIL ครบ ' + limit + ' retry');
           return true;
         }
         activeJob.nextPickupAt = now + PICKUP_RETRY_INTERVAL_MS;
-        stage('pickup-fail', 'server ตอบ pickup FAIL → retry ' + (retries + 1) + '/' + limit);
-        log('⚠️ Loot Queue: server ตอบ pickup FAIL', activeJob.job.itemName, '→ retry ' + (retries + 1) + '/' + limit + ' ใน ' + PICKUP_RETRY_INTERVAL_MS + 'ms');
+        stage('pickup-fail', 'server ตอบ pickup FAIL → retry ' + attempts + '/' + limit);
+        log('⚠️ Loot Queue: server ตอบ pickup FAIL', activeJob.job.itemName, '→ retry ' + attempts + '/' + limit + ' ใน ' + PICKUP_RETRY_INTERVAL_MS + 'ms');
         return true;
+      },
+      onPickupTakenByOther(dropId) {
+        if (!activeJob || activeJob.settleUntil || activeJob.job.dropId !== dropId) return false;
+        return discardActive('ผู้เล่นอื่นเก็บ drop นี้ไปแล้ว');
       },
       // รับ WARP_FAIL (0x2a) เฉพาะงาน collector ที่กำลังรอข้ามแมปอยู่
       // คืน true เพื่อบอก packet router ว่าไม่ต้องส่งต่อให้ Warp-to-Loot flow เดิม
@@ -2044,7 +2269,15 @@
           }
         }
       },
+      pause() {
+        if (activeJob && !activeJob.settleUntil) send({ type: 'nack', id: activeJob.job.id, claimToken: activeJob.claimToken });
+        activeJob = null; homeReturn = null; claimPendingId = null; claimPendingAt = 0; idleReturnAt = 0; nextClaimAt = 0;
+        pendingOffers.clear(); availableJobs.clear();
+        lootQueueTransport.close();
+      },
+      resume() { connect(); },
       tick() {
+        if (!masterBot.enabled()) return;
         connect(); offerPending();
         if (role() !== 'collector') return;
         // hard-full = เก็บต่อไม่ได้แล้ว จึงคืนงานให้ queue ก่อนให้ Storage เป็นเจ้าของการวาร์ป
@@ -2061,6 +2294,8 @@
             homeReturn = null;
             return;
           }
+          if (nowMs() < nextClaimAt) return;
+          nextClaimAt = 0;
           if (homeReturn) {
             const nextWhileReturning = [...availableJobs.values()].filter(job => job.expiresAt > nowMs()).sort((a, b) => a.createdAt - b.createdAt)[0];
             if (nextWhileReturning) {
@@ -2193,34 +2428,44 @@
           stage('map-settle', 'รอ map-ready ' + mapReadyWaitMs + 'ms ก่อน pickup (' + lootQueueTransportLabel() + ')');
           return;
         }
+        const sendPickupAttempt = (label) => {
+          if (!sendPickup(job.dropId)) return false;
+          activeJob.pickupAt = activeJob.pickupAt || now;
+          activeJob.pickupAttempts = (activeJob.pickupAttempts || 0) + 1;
+          activeJob.waitingPickupResult = true;
+          activeJob.pickupResponseDueAt = now + pickupResponseWaitMs();
+          activeJob.lastActionAt = now;
+          activeJob.positionPacketAt = lastPlayerPositionPacketAt;
+          activeJob.nextPickupAt = 0;
+          log('📮 Loot Queue: ' + label, job.itemName, '(' + activeJob.pickupAttempts + '/' + (1 + pickupRetryCount()) + ')');
+          return true;
+        };
         if (!activeJob.pickupAt) {
-          if (sendPickup(job.dropId)) {
-            activeJob.pickupAt = now;
-            activeJob.lastActionAt = now;
-            activeJob.positionPacketAt = lastPlayerPositionPacketAt;
-            activeJob.pickupRetries = 0;
-            activeJob.nextPickupAt = now + PICKUP_RETRY_INTERVAL_MS;
-            log('📮 Loot Queue: ส่ง pickup ทันทีหลังถึงแมป', job.itemName);
-          }
+          sendPickupAttempt('ส่ง pickup หลังถึงแมป');
           return;
         }
-        // คำสั่งแรกอาจชนช่วง map transition/cooldown ของ teleport. ยิงซ้ำแบบจำกัด
-        // ทั้งกรณี server ตอบ FAIL และกรณี server เงียบ โดยไม่ reset action timeout เมื่อยังเงียบ.
-        if (now >= (activeJob.nextPickupAt || 0) && (activeJob.pickupRetries || 0) < pickupRetryCount()) {
-          if (sendPickup(job.dropId)) {
-            activeJob.pickupRetries = (activeJob.pickupRetries || 0) + 1;
-            activeJob.nextPickupAt = now + PICKUP_RETRY_INTERVAL_MS;
-            log('📮 Loot Queue: retry pickup หลังถึงแมป', job.itemName, '(' + activeJob.pickupRetries + '/' + pickupRetryCount() + ')');
-          }
-        }
-        // ถ้า server กำลังเดินให้ จะมี packet ตำแหน่งใหม่: ต่ออายุเฉพาะ timeout ของ "ไม่มี action"
+        // ถ้า server กำลังเดินให้ รอผลคำสั่งเดิมต่อไปและขยายเวลารอจาก movement จริง.
         if (lastPlayerPositionPacketAt > activeJob.positionPacketAt) {
           activeJob.positionPacketAt = lastPlayerPositionPacketAt;
           activeJob.lastActionAt = now;
+          if (activeJob.waitingPickupResult) activeJob.pickupResponseDueAt = now + pickupResponseWaitMs();
           return;
         }
-        const timeoutMs = Math.max(1000, Math.min(30000, Number(CFG.lootQueueActionTimeoutMs) || 5000));
-        if (now - activeJob.lastActionAt >= timeoutMs) discardActive('ไม่มี action หลังวาร์ป/ส่ง pickup เกิน ' + (timeoutMs / 1000) + 's');
+        if (activeJob.waitingPickupResult) {
+          if (now < activeJob.pickupResponseDueAt) return;
+          activeJob.waitingPickupResult = false;
+          if ((activeJob.pickupAttempts || 0) >= 1 + pickupRetryCount()) {
+            discardActive('server เงียบหลัง pickup ครบ ' + pickupRetryCount() + ' retry');
+            return;
+          }
+          activeJob.nextPickupAt = now + PICKUP_RETRY_INTERVAL_MS;
+          stage('pickup-timeout', 'รอผล pickup ไม่ทัน → retry แบบไม่ซ้อนคำสั่ง');
+          return;
+        }
+        if (now >= (activeJob.nextPickupAt || 0)) {
+          sendPickupAttempt('retry pickup หลังถึงแมป');
+          return;
+        }
       },
       status() {
         const canSkip = !!activeJob && !activeJob.settleUntil;
@@ -2232,6 +2477,7 @@
           activeJob: activeJob && activeJob.job, activeStage: activeJob?.stage || (homeReturn ? 'return-home ' + homeReturn.attempts + '/' + MAX_WARP_ATTEMPTS : ''),
           claimDelayRemainingMs: activeJob ? Math.max(0, (activeJob.claimDelayUntil || 0) - nowMs()) : 0,
           nearbySettleRemainingMs: activeJob ? Math.max(0, (activeJob.settleUntil || 0) - nowMs()) : 0,
+          nextClaimRemainingMs: Math.max(0, nextClaimAt - nowMs()),
           canSkip, availableJobs: availableJobs.size, returningHome: !!homeReturn };
       },
       reconnect() { lootQueueTransport.reconnect(); connect(); },
@@ -2317,6 +2563,7 @@
   }
 
   function tryClaim(d) {
+    if (!masterBot.enabled()) return;
     if (queue.has(d.dropId)) return;
     const now = Date.now();
     if (now - lastCombatAt > CFG.combatWindowMs) return;
@@ -2587,6 +2834,7 @@
     log('⚠️ Auto-Login UI: ' + reason + ' — หยุดเพื่อไม่ให้คลิกข้ามหน้า');
   }
   function runAutoLoginUi() {
+    if (!masterBot.enabled()) return;
     if (!CFG.autoLoginEnabled) { clearAutoLoginBootstrap(); return; }
     const now = Date.now();
     if (now < autoLoginUiNextAt) return;
@@ -2659,7 +2907,7 @@
     }
   }
   function startAutoLoginBootstrap() {
-    if (!CFG.autoLoginEnabled || autoLoginBootstrapStarted) return;
+    if (!masterBot.enabled() || !CFG.autoLoginEnabled || autoLoginBootstrapStarted) return;
     autoLoginBootstrapStarted = true;
     const startedAt = Date.now();
     let splashTries = 0, enterTries = 0;
@@ -2671,6 +2919,7 @@
     };
     // Unity หน้า splash ต้องได้รับ pointer event ก่อนจึงจะโหลดถึงหน้า Login
     autoLoginSplashTimer = setInterval(() => {
+      if (!masterBot.enabled()) { clearAutoLoginBootstrap(); return; }
       if (stopIfConnected()) return;
       if (Date.now() - startedAt > 180000) { clearAutoLoginBootstrap(); return; }
       splashTries++;
@@ -2687,6 +2936,7 @@
     }, 8000);
     // Unity canvas ไม่รับ synthetic text input ที่เชื่อถือได้ แต่รับ Enter ได้
     autoLoginEnterTimer = setInterval(() => {
+      if (!masterBot.enabled()) { clearAutoLoginBootstrap(); return; }
       if (stopIfConnected()) return;
       if (enterTries >= 8) { clearAutoLoginBootstrap(); return; }
       enterTries++;
@@ -2702,7 +2952,11 @@
     if (autoRefreshScheduled) return;
     autoRefreshScheduled = true;
     logImportant('flee', '🔄 [Auto-Refresh] ' + reason + ' → refresh หน้าเพื่อ reconnect/login ใหม่');
-    setTimeout(() => location.reload(), 1500);
+    autoRefreshTimer = setTimeout(() => {
+      autoRefreshTimer = null;
+      if (masterBot.enabled()) location.reload();
+      else autoRefreshScheduled = false;
+    }, 1500);
   }
 
   // ---------- inbound protocol implementation (เรียกผ่าน Game Packet runtime ด้านล่าง) ----------
@@ -2716,7 +2970,7 @@
         clearAutoLoginBootstrap();
         log('🤖 Auto-Login: เกม login ผ่าน → จะเลือกตัวละคร slot', CFG.autoLoginSlot, 'ใน 2.5s');
         setTimeout(() => {
-          if (autoLoginPhase !== 'acctOk' || !activeWS || activeWS.readyState !== 1) return;
+          if (!masterBot.enabled() || autoLoginPhase !== 'acctOk' || !activeWS || activeWS.readyState !== 1) return;
           // ตั้ง phase ก่อน send เพราะ ws.send จะผ่าน handleOut แบบ synchronous
           // → แยก packet ที่บอทยิงเองออกจาก client ที่กดเลือกผ่าน UI ได้ถูกต้อง
           autoLoginPhase = 'charSent';
@@ -2851,6 +3105,7 @@
       } else if (picker !== FAIL) {
         // มี entity อื่นเก็บ drop นี้ไปแล้ว (เช่น Porporing loot หรือผู้เล่นอื่น)
         // ไม่ใช่ FAIL ของเรา จึงไม่มีประโยชน์ที่จะ retry ต่อจนคิวค้าง
+        const lootQueueTaken = lootQueue.onPickupTakenByOther(dropId);
         if (it) {
           queue.delete(dropId);
           log('🗑️ ของถูกเก็บไปแล้ว:', nameOf(it.itemId), 'drop', dropId, '(picker', picker.toString(16) + ')');
@@ -2858,6 +3113,7 @@
         }
         if (wit) warpQueue.delete(dropId);
         recentDrops.delete(dropId);
+        if (lootQueueTaken) log('🗑️ Loot Queue: drop ถูกเก็บโดย entity อื่น → ทิ้งงานนี้');
       } else {
         // FAIL ไม่ได้แปลว่าของหายเสมอไป: อาจยังเดินไปไม่ถึงหรือ server sync ช้า
         // จึงเก็บไว้ลองซ้ำจนถึง maxAttempts; ถ้าครบแล้วค่อยปล่อย.  แต่ต้อง
@@ -2905,6 +3161,7 @@
         if (name && name !== currentMap) {
           const prevMap = currentMap;
           currentMap = name;
+          settleFpsCapAfterMapLoad();
           confirmTeleportMapChange(name);
           lootQueue.onMapChanged(name);
           log('🗺️ แมป:', name);
@@ -2923,7 +3180,7 @@
           //   เงื่อนไข: warpBackToFarm=on AND farmMap ไม่ว่าง AND ตอนนี้ไม่ใช่ farmMap
           //   ★★ ไม่จำกัดแค่ "มาจาก farmMap" — ถ้าอยู่แมปผิดก็วาร์ปกลับเสมอ (กันติดแมปอื่น)
           //   ยกเว้น: อยู่ใน sell/storage/ore-refine routine — ไม่วาร์ปกลับ
-          if (CFG.warpBackToFarm && CFG.farmMap && name !== CFG.farmMap && !lootQueue.isCollectorActive() && !isAbBuffActive()
+          if (masterBot.enabled() && CFG.warpBackToFarm && CFG.farmMap && name !== CFG.farmMap && !lootQueue.isCollectorActive() && !isAbBuffActive()
               && name !== CFG.sellNpcMap && name !== CFG.kafraMap
               && !(isOreRefineActive() && name === CFG.oreRefineMap)) {
             log('🌀 อยู่แมปผิด (' + name + '≠' + CFG.farmMap + ') → วาร์ปกลับ');
@@ -3188,7 +3445,7 @@
               logImportant('card', label + ' ที่ (' + x + ', ' + y + ') ห่าง ' + dist + ' ช่อง');
             }
             // ★ auto-warp (ถ้าเปิด toggle)
-            if (CFG.warpToBoss && player.x != null && now - lastBossWarpAt > 10000) {
+            if (masterBot.enabled() && CFG.warpToBoss && player.x != null && now - lastBossWarpAt > 10000) {
               const d = Math.hypot(x - player.x, y - player.y);
               if (d > 10) {
                 const label = isRealBoss ? '👑 Boss' : '👹 Mini Boss';
@@ -3287,9 +3544,8 @@
         lastSellAt = nowMs();
         // ★ chain → storage: ถ้าเปิด depositAfterSell และมีของฝาก → ฝากต่อ (mirror bot.js:1773-1781)
         //   ใช้ sellReturnTo เป็นจุดกลับของ storage ด้วย (เพราะอยู่ในเมืองอยู่แล้ว → วาร์ปไป Kafra ใกล้ ๆ)
-        if (CFG.storageEnabled && CFG.depositAfterSell && CFG.depositItemIds.length > 0) {
-          let hasDeposit = false;
-          for (const id of CFG.depositItemIds) { if ((inventory.get(id) || 0) > 0) { hasDeposit = true; break; } }
+        if (CFG.storageEnabled && CFG.depositAfterSell) {
+          const hasDeposit = hasDepositableInventory();
           if (hasDeposit) {
             const retTo = sellReturnTo;   // จดก่อน sell clear
             sellState = 'IDLE'; sellReturnTo = null;   // clear sell ก่อนเริ่ม storage
@@ -3673,6 +3929,16 @@
     }
   }
   function handleOutboundProtocol(u) {
+    // 0x40 TELEPORT: ดักทั้งคำสั่งจากบอทและการวาร์ปที่ผู้เล่นกดเอง เพื่อปลด
+    // FPS cap ก่อน Unity เริ่มโหลด scene ถัดไป. coordinator ด้านบนอาจเรียกซ้ำ
+    // ได้อย่างปลอดภัย เพราะเป็นเพียงการรีเซ็ต timeout ของการปลด cap เดิม.
+    if (u[0] === 0x40 && u.length >= 3) {
+      const mapLen = u16(u, 1);
+      if (mapLen > 0 && u.length >= 3 + mapLen) {
+        const destinationMap = new TextDecoder().decode(u.slice(3, 3 + mapLen));
+        if (destinationMap && destinationMap !== currentMap) suspendFpsCapForMapLoad();
+      }
+    }
     if (u[0] === 0x0b) markCombat();
     // หน้าเลือกตัวละครของ Unity ส่ง 0x03 เองหลังรับปุ่ม Enter
     // → ยกเลิกแผนส่ง packet ของเรา เพื่อไม่ให้ SELECT_CHAR ซ้อนกัน
@@ -4150,6 +4416,7 @@
 
   // ---------- loop เก็บของ ----------
   const lootLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!CFG.lootEnabled) return;
     if (lootQueue.isCollectorBusy()) return;
     if (isAbBuffActive()) return;
@@ -4215,6 +4482,7 @@
   //  offset pattern: กลาง → เหนือ3 → ตอ3 → ใต้3 → ตต3 (เหมือนบอทหลัก)
   const WARP_OFFSETS = [[0,0,'กลาง'], [0,-3,'เหนือ3'], [3,0,'ตอ3'], [0,3,'ใต้3'], [-3,0,'ตต3']];
   const warpLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!CFG.warpLootEnabled) return;
     if (isAbBuffActive()) return;
     if (isAiReplyInteractionActive()) return;
@@ -4285,6 +4553,7 @@
   }
   // สร้าง trigger check + state machine ใน loop เดียว
   const sellLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!CFG.sellEnabled) return;
     if (isAbBuffActive()) return;
     if (isOreRefineActive()) return;
@@ -4439,26 +4708,42 @@
     setStorageState('WARP_TO_KAFRA');
     return true;
   }
+  function storageDepositMode() { return CFG.storageDepositMode === 'selected' ? 'selected' : 'all'; }
+  function storageDepositItemIds() {
+    if (storageDepositMode() === 'selected') return [...new Set(Array.isArray(CFG.depositItemIds) ? CFG.depositItemIds : [])];
+    return [...inventory.keys()];
+  }
+  function storageReserveAmount(itemId) {
+    return getStorageReserveItems().find(item => item.itemId === Number(itemId))?.amount || 0;
+  }
+  function isEquippedBagId(bagId) { return [...equippedBagIds.values()].includes(Number(bagId)); }
+  // A full 0x38 snapshot is the only moment we know every equipped bag ID.
+  // Until then, all unique equipment stays protected rather than risking it.
+  function hasEquipmentSnapshot() { return inventorySnapshotAt > 0; }
   // ★ สร้าง queue ของที่จะฝาก — แยก equipment vs stackable (mirror bot.js:1947-1987)
   function buildDepositQueue() {
     const queue = [];
-    for (const itemId of CFG.depositItemIds) {
+    // "ฝากทุกอย่าง" ต้องรอ 0x38 ก่อนเสมอ: ถ้ารายการ inventory ยังมาไม่ครบ
+    // เราไม่อาจแยกของสวมใส่ออกจาก stackable ได้อย่างปลอดภัย.
+    if (storageDepositMode() === 'all' && !hasEquipmentSnapshot()) return queue;
+    for (const itemId of storageDepositItemIds()) {
       const stock = inventory.get(itemId) || 0;
       if (stock <= 0) continue;
       const eqSlots = equipmentSlots.get(itemId);
       if (eqSlots && eqSlots.length > 0) {
+        if (!hasEquipmentSnapshot()) continue; // safe default before we know worn slots
         // ★★ equipment — ฝากจาก slot สูง→ต่ำ (กัน index shift) ทีละชิ้น amount=1
         const sorted = [...eqSlots].sort((a, b) => b - a);
         for (const slotId of sorted) {
-          if (isWeaponBagProtected(slotId)) {
-            log('🛡️ ข้ามฝาก Weapon Set:', nameOf(itemId), '(bag ' + slotId + ')');
+          if (isEquippedBagId(slotId) || isWeaponBagProtected(slotId)) {
             continue;
           }
           queue.push({ itemId, amount: 1, invId: slotId, isEquipment: true });
         }
       } else {
-        // ★ stackable — ทั้งกองทีเดียว (moveId = itemId)
-        queue.push({ itemId, amount: stock, invId: itemId, isEquipment: false });
+        // ★ stackable — เก็บยอด reserve ติดตัวไว้ ไม่ต้องฝากแล้วถอนกลับในรอบเดียว
+        const amount = Math.max(0, stock - storageReserveAmount(itemId));
+        if (amount > 0) queue.push({ itemId, amount, invId: itemId, isEquipment: false });
       }
     }
     return queue;
@@ -4520,6 +4805,7 @@
     return queue;
   }
   const storageLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!CFG.storageEnabled) return;
     if (isAbBuffActive()) return;
     if (isOreRefineActive()) return;
@@ -4858,6 +5144,7 @@
     }
   }
   const oreRefineLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!isOreRefineActive()) return;
     if (!activeWS || activeWS.readyState !== 1 || isDead) return;
     const now = nowMs();
@@ -4994,7 +5281,16 @@
     }
   }
   function hasDepositableInventory() {
-    return CFG.depositItemIds.some(id => (inventory.get(id) || 0) > 0);
+    if (storageDepositMode() === 'all' && !hasEquipmentSnapshot()) return false;
+    return storageDepositItemIds().some(itemId => {
+      const stock = inventory.get(itemId) || 0;
+      if (stock <= 0) return false;
+      const eqSlots = equipmentSlots.get(itemId);
+      if (eqSlots && eqSlots.length) {
+        return hasEquipmentSnapshot() && eqSlots.some(slotId => !isEquippedBagId(slotId) && !isWeaponBagProtected(slotId));
+      }
+      return stock > storageReserveAmount(itemId);
+    });
   }
   function isDepositWeightReached() {
     const threshold = Math.max(0, Math.min(100, Number(CFG.depositWeightPercent) || 0));
@@ -5004,13 +5300,43 @@
   // Storage กับ Loot Queue ใช้ trigger เดียวกัน เพื่อไม่ให้ทั้งคู่ส่งวาร์ปในรอบเดียวกัน
   // urgent=true เฉพาะ server แจ้ง "เก็บต่อไม่ได้"; น้ำหนักถึงเกณฑ์ยังรอ job ที่ claim แล้วจบได้
   function getStorageDepositTrigger() {
-    if (!CFG.storageEnabled || !CFG.depositOnFull || !CFG.depositItemIds.length || !hasDepositableInventory()) return null;
+    if (!CFG.storageEnabled || !CFG.depositOnFull || !hasDepositableInventory()) return null;
     if (inventoryFull) return { reason: 'ของเต็ม', urgent: true };
     if (isDepositWeightReached()) {
       const pct = inventoryWeightPercent();
       return { reason: 'น้ำหนัก ' + pct.toFixed(1) + '%', urgent: false };
     }
     return null;
+  }
+  // เหตุผลเดียวที่ auto-storage ยังไม่เริ่ม: ใช้ทั้ง console diagnostics และ HUD
+  // เพื่อไม่ให้ปุ่ม "ฝากเดี๋ยวนี้" ใช้ได้ แต่ auto เงียบจนหาสาเหตุไม่พบ.
+  function storageAutoBlockers(now = nowMs()) {
+    const blockers = [];
+    if (!CFG.storageEnabled) blockers.push('Storage: OFF');
+    if (!CFG.depositOnFull) blockers.push('ปิด trigger ฝากเมื่อน้ำหนักเต็ม');
+    if (storageDepositMode() === 'selected' && !storageDepositItemIds().length) blockers.push('ยังไม่มีรายการของที่จะฝาก');
+    else if (!hasDepositableInventory()) blockers.push(storageDepositMode() === 'all' ? 'ไม่มีของที่ฝากได้ (ของสวม/Weapon Set/Reserve จะถูกกันไว้)' : 'ไม่มีรายการฝากอยู่ใน inventory');
+    if (!activeWS || activeWS.readyState !== 1) blockers.push('WebSocket เกมยังไม่เชื่อมต่อ');
+    if (isDead) blockers.push('ตัวละครตาย');
+    if (isAbBuffActive()) blockers.push('AB Buff=' + abBuffState);
+    if (isOreRefineActive()) blockers.push('Ore Refine=' + oreRefineState);
+    if (sellState !== 'IDLE') blockers.push('Sell=' + sellState);
+    if (storageState !== 'IDLE') blockers.push('Storage=' + storageState);
+    if (now < storageRetryAt) blockers.push('รอ retry อีก ' + Math.ceil((storageRetryAt - now) / 1000) + 's');
+    if (!currentMap) blockers.push('ยังไม่รู้แมป');
+    if (player.x == null || player.y == null) blockers.push('ยังไม่รู้พิกัดตัวละคร');
+
+    const trigger = getStorageDepositTrigger();
+    if (!trigger && CFG.storageEnabled && CFG.depositOnFull && hasDepositableInventory()) {
+      const threshold = Math.max(0, Math.min(100, Number(CFG.depositWeightPercent) || 0));
+      const percent = inventoryWeightPercent();
+      if (inventoryFull) blockers.push('รอข้อมูล inventory หลังเต็ม');
+      else if (threshold <= 0) blockers.push('เกณฑ์น้ำหนักเป็น 0%');
+      else if (percent == null) blockers.push('ยังไม่รู้ค่าน้ำหนัก/น้ำหนักสูงสุดจาก Game Packet');
+      else blockers.push('น้ำหนัก ' + percent.toFixed(1) + '% < เกณฑ์ ' + threshold + '%');
+    }
+    if (trigger && lootQueue.isCollectorActive()) blockers.push('Loot Queue collector กำลังทำงาน');
+    return { trigger, blockers };
   }
   function shouldHoldLootQueueForStorage() {
     return storageState !== 'IDLE' || !!getStorageDepositTrigger();
@@ -5992,6 +6318,7 @@ function abBuffTimeoutMs() {
     returnFromAbBuff('AB Buff timeout → กลับฟาร์มและปิดระบบ');
   }
   const abBuffLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     const timerNow = abBuffTimerNow();      // timer ภายใน AB ต้องเป็น clock เดียวกันทั้งหมด
     for (const [statusId, effect] of abBuffEffects) {
       if (effect.expiresAt <= timerNow) abBuffEffects.delete(statusId);
@@ -6272,6 +6599,7 @@ function abBuffTimeoutMs() {
     resetCombatGatChase();
   }
   function doFlee(reason) {
+    if (!masterBot.enabled()) return false;
     const now = nowMs();
     if (now - lastFleeAt < CFG.fleeCooldownMs) return false;
     log('🏃 วาร์ปหนี:', reason);
@@ -6296,6 +6624,7 @@ function abBuffTimeoutMs() {
   // Player Flee มีทางตัดสินใจเดียว: packet event, post-warp scan และ combat loop เรียกที่นี่ร่วมกัน
   // คืน true ระหว่างนับ delay/เก็บของ/cooldown เพื่อห้าม flow อื่น (พัก/เดิน/ตี) แทรก
   function fleePlayersIfNeeded(reasonSuffix = '') {
+    if (!masterBot.enabled()) return false;
     // AI Reply ต้อง hold การวาร์ปจนสนทนาจบ แต่ห้ามล้างเวลาที่เริ่มพบผู้เล่นแล้ว
     // เมื่อผู้พูดออกจากระยะตอบ หากยังมีคนอยู่ใน Flee radius จะวาร์ปได้ทันที
     // หาก delay ครบไปก่อนแล้ว แทนที่จะเริ่มนับ delay ใหม่อีกรอบ
@@ -6342,6 +6671,7 @@ function abBuffTimeoutMs() {
 
   // ดักทันทีเมื่อ packet ยืนยันผู้เล่นเข้ามา โดยไม่รอ combat tick
   function instantFleeCheck(e) {
+    if (!masterBot.enabled()) return;
     if (!e || e.kind !== 0 || !e.alive || e.id === playerId || e.x == null || e.y == null) return;
     const radius = CFG.fleeOnPlayerRadius || 10;
     if (player.x == null || Math.hypot(e.x - player.x, e.y - player.y) > radius) return;
@@ -6351,6 +6681,7 @@ function abBuffTimeoutMs() {
   // ตรวจซ้ำเพียงรอบเดียวหลังวาร์ปสำเร็จ ใช้ count/doFlee เดียวกับ combat loop
   // ไม่มี path Flee แยก และยังเคารพ hold ของ AB Buff / Storage ตามเดิม
   function runPostWarpFleeScan() {
+    if (!masterBot.enabled()) return false;
     postWarpFleeScanPending = false;
     return fleePlayersIfNeeded(' (หลังวาร์ป)');
   }
@@ -6566,6 +6897,7 @@ function abBuffTimeoutMs() {
 
   let combatCooldownUntil = 0;   // ★ หยุด combat ชั่วคราวจนกว่าจะถึงเวลานี้ (post-combat delay)
   const combatLoop = setInterval(() => {
+    if (!masterBot.enabled()) return;
     const now = nowMs();
     tickTeleportCoordinator(now);
     // Auto-Respawn ต้องมาก่อนทุก flow รวมถึง Loot Queue: collector อาจตายระหว่างไปรับ drop
@@ -7181,12 +7513,13 @@ function abBuffTimeoutMs() {
       log('🗺️ GAT:', mapName, 'โหลดแล้ว (' + data.w + '×' + data.h + ')');
     } catch (e) { dbg('🗺️ GAT load ล้มเหลว:', mapName, e.message); }
   }
-  setInterval(() => { if (currentMap && !gatCache.has(currentMap)) gatLoad(currentMap); }, 5000);
+  setInterval(() => { if (masterBot.enabled() && currentMap && !gatCache.has(currentMap)) gatLoad(currentMap); }, 5000);
 
   // ตำแหน่งเกมบาง build กลับแกน y จากข้อมูล .gat; เก็บ 20 ตัวอย่างแล้วล็อกผลที่ตรงช่องเดินได้มากกว่า
   let gatFlipY = false, gatFlipLocked = false, gatCalN = 0, gatCalNormal = 0, gatCalFlip = 0;
   function gatCalibrationReset() { gatFlipY = false; gatFlipLocked = false; gatCalN = 0; gatCalNormal = 0; gatCalFlip = 0; }
   setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!currentMap || player.x == null || player.y == null) return;
     const g = gatCache.get(currentMap);
     if (!g || gatFlipLocked) return;
@@ -7948,6 +8281,7 @@ function abBuffTimeoutMs() {
     log('🎯 Auto-Login: เลือก slot ' + slot + ' (←×3 →×' + slot + ' + Enter) — รอเข้าเกม');
   }
   const csNudgeTimer = setInterval(async () => {
+    if (!masterBot.enabled()) return;
     const wsOpen = activeWS && activeWS.readyState === 1;
     if (!CFG.autoLoginEnabled || !wsOpen || playerId != null || autoLoginPhase === 'clientSelect' || autoLoginPhase === 'done') {
       if (playerId != null || autoLoginPhase === 'done') csNudgeTries = 0;
@@ -7967,6 +8301,7 @@ function abBuffTimeoutMs() {
 
   // เฝ้าระวัง recovery เท่านั้น: ไม่สั่ง teleport/attack และไม่เข้าไปยุ่ง flow ในเกม
   const autoRefreshWatchdog = setInterval(() => {
+    if (!masterBot.enabled()) return;
     if (!CFG.autoRefreshEnabled || autoRefreshScheduled) return;
     const now = Date.now();
     const stallMs = Math.max(60, Number(CFG.autoRefreshStallSec) || 180) * 1000;
@@ -7981,6 +8316,39 @@ function abBuffTimeoutMs() {
       scheduleAutoRefresh('ค้างหน้า login/เลือกตัวละครเกิน ' + Math.round(stallMs / 1000) + 's');
     }
   }, 10000);
+
+  // One cleanup owner for Master Bot.  It never sends another game command on
+  // pause: any active NPC window is harmless, while stale route/claim state is
+  // not.  Resume starts from fresh packet state and the existing per-feature
+  // settings remain untouched.
+  masterBot.setHandlers({
+    pause() {
+      lootQueue.pause();
+      queue.clear();
+      warpQueue.clear();
+      pickupPending = null;
+      recentDrops.clear();
+      lootSettleUntil = 0;
+      target = null;
+      resetCombatGatChase();
+      resetWeaponSwap('Master Bot paused');
+      movementPlanner.reset();
+      navPatrolReset(); navWanderReset(); gatWanderReset();
+      resetAutoSupportQueue();
+      clearAiInteraction('Master Bot paused');
+      stopAbBuff('Master Bot paused');
+      sellState = 'IDLE'; sellReturnTo = null; sellNpcId = null;
+      storageState = 'IDLE'; storageReturnTo = null; storageNpcId = null; storageMoveQueue = []; storageMoveIdx = 0;
+      oreRefineState = 'IDLE'; oreRefineBatch = 0; oreRefineKafraId = null; oreRefineNpcId = null;
+      clearAutoLoginBootstrap();
+      if (autoRefreshTimer) clearTimeout(autoRefreshTimer);
+      autoRefreshTimer = null; autoRefreshScheduled = false;
+    },
+    resume() {
+      if (CFG.autoLoginEnabled) startAutoLoginBootstrap();
+      lootQueue.resume();
+    },
+  });
 
   // Profile switch เป็นจุดเปลี่ยน config ใหญ่ จึงรอให้ action ที่ถือสิทธิ์/ส่ง packet ต่อเนื่องจบก่อน
   // การ block ดีกว่าตัด state กลางทาง เพราะอาจทิ้ง claim Loot Queue หรือคุย NPC ผิด flow ได้.
@@ -8039,7 +8407,7 @@ function abBuffTimeoutMs() {
         ? cloneConfigValue(targetProfile[key])
         : cloneConfigValue(CFG_DEFAULTS[key]);
     }
-    const profileFpsCap = fpsCap.set(CFG.renderFpsCap);
+    const profileFpsCap = setConfiguredFpsCap(CFG.renderFpsCap);
     CFG.renderFpsCap = profileFpsCap == null ? 0 : profileFpsCap;
     saveProfilesStore(profiles);
     setActiveProfileName(name);
@@ -8072,6 +8440,12 @@ function abBuffTimeoutMs() {
   //  API ควบคุมจาก console — พิมพ์ ASSIST.<method>()
   // ============================================================
   window.ASSIST = {
+    // ---------- Master Bot ----------
+    masterBotOn() { return masterBot.setEnabled(true); },
+    masterBotOff() { return masterBot.setEnabled(false); },
+    toggleMasterBot() { return masterBot.setEnabled(!masterBot.enabled()); },
+    masterBotStatus() { return masterBot.status(); },
+
     // ---------- Profile ----------
     activeProfile() { return activeProfileName(); },
     listProfiles() { return profileNames(); },
@@ -8120,7 +8494,7 @@ function abBuffTimeoutMs() {
       };
     },
     setFpsCap(value) {
-      const fps = fpsCap.set(value);
+      const fps = setConfiguredFpsCap(value);
       if (fps == null) {
         log('⚠️ FPS Cap ต้องเป็น ' + FPS_CAP_OPTIONS.join(', ') + ' เท่านั้น (0 = Unlimited)');
         return false;
@@ -8130,7 +8504,14 @@ function abBuffTimeoutMs() {
       log('🎞 FPS Cap: ' + (fps === 0 ? 'Unlimited' : fps + ' FPS'));
       return true;
     },
-    fpsCapStatus() { return { ...fpsCap.status(), options: [...FPS_CAP_OPTIONS] }; },
+    fpsCapStatus() {
+      return {
+        ...fpsCap.status(), bootCompleted: unityBootCompleted,
+        mapLoadUncapped: fpsCapMapLoadActive,
+        mapLoadRestoreRemainingMs: Math.max(0, fpsCapMapRestoreAt - Date.now()),
+        options: [...FPS_CAP_OPTIONS],
+      };
+    },
     help() {
       console.log(`%c ASSIST — คำสั่ง `, 'background:#4caf50;color:#fff;padding:2px 6px;border-radius:3px');
       console.log(`%c Auto-Heal `, 'color:#e91e63;font-weight:bold');
@@ -8541,12 +8922,12 @@ function abBuffTimeoutMs() {
     getInventory() { return [...inventory.entries()].map(([id, c]) => ({ id, name: itemDisplayName(id), count: c, action: getItemAction(Number(id)) })).sort((a, b) => b.count - a.count); },
 
     // ---------- Auto-Storage (ฝากเข้า Kafra) ----------
-    storageOn()  { CFG.storageEnabled = true;  log('🏦 Auto-Storage: ON'); },
-    storageOff() { CFG.storageEnabled = false; log('🏦 Auto-Storage: OFF'); },
-    setKafra(name, map) { CFG.kafraName = name; if (map) CFG.kafraMap = map; log('🏦 Kafra:', name, '@', CFG.kafraMap); },
-    setKafraPos(x, y) { CFG.kafraMapX = Math.round(Number(x)); CFG.kafraMapY = Math.round(Number(y)); log('🏦 พิกัดวาร์ป Kafra:', CFG.kafraMapX, CFG.kafraMapY); },
-    useCurrentPosAsKafra() { if (player.x != null && player.y != null) { CFG.kafraMapX = Math.round(player.x); CFG.kafraMapY = Math.round(player.y); if (currentMap) CFG.kafraMap = currentMap; log('🏦 ใช้พิกัดปัจจุบันเป็นจุดวาร์ป Kafra:', CFG.kafraMap, '@(', CFG.kafraMapX, CFG.kafraMapY + ')'); } else { log('⚠️ ยังไม่รู้พิกัดตัวละคร'); } },
-    toggleDepositOnFull(on) { CFG.depositOnFull = !!on; log('🏦 Trigger ฝากเมื่อเต็ม/ถึงน้ำหนัก =', CFG.depositOnFull); },
+    storageOn()  { CFG.storageEnabled = true; saveConfigDebounced(); log('🏦 Auto-Storage: ON'); },
+    storageOff() { CFG.storageEnabled = false; saveConfigDebounced(); log('🏦 Auto-Storage: OFF'); },
+    setKafra(name, map) { CFG.kafraName = name; if (map) CFG.kafraMap = map; saveConfigDebounced(); log('🏦 Kafra:', name, '@', CFG.kafraMap); },
+    setKafraPos(x, y) { CFG.kafraMapX = Math.round(Number(x)); CFG.kafraMapY = Math.round(Number(y)); saveConfigDebounced(); log('🏦 พิกัดวาร์ป Kafra:', CFG.kafraMapX, CFG.kafraMapY); },
+    useCurrentPosAsKafra() { if (player.x != null && player.y != null) { CFG.kafraMapX = Math.round(player.x); CFG.kafraMapY = Math.round(player.y); if (currentMap) CFG.kafraMap = currentMap; saveConfigDebounced(); log('🏦 ใช้พิกัดปัจจุบันเป็นจุดวาร์ป Kafra:', CFG.kafraMap, '@(', CFG.kafraMapX, CFG.kafraMapY + ')'); } else { log('⚠️ ยังไม่รู้พิกัดตัวละคร'); } },
+    toggleDepositOnFull(on) { CFG.depositOnFull = !!on; saveConfigDebounced(); log('🏦 Trigger ฝากเมื่อเต็ม/ถึงน้ำหนัก =', CFG.depositOnFull); },
     setDepositWeightPercent(pct) {
       CFG.depositWeightPercent = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
       saveConfigDebounced();
@@ -8563,22 +8944,42 @@ function abBuffTimeoutMs() {
         source: lastWeightSource || null,
       };
     },
-    toggleDepositAfterSell(on) { CFG.depositAfterSell = !!on; log('🏦 ฝากหลังขาย =', CFG.depositAfterSell); },
-    setDepositItems(...ids) { CFG.depositItemIds = ids; log('🏦 ฝาก item:', ids.map(nameOf).join(', ')); },
-    addDepositItem(id) { if (!CFG.depositItemIds.includes(id)) CFG.depositItemIds.push(id); log('🏦 เพิ่มฝาก:', nameOf(id)); },
-    removeDepositItem(id) { CFG.depositItemIds = CFG.depositItemIds.filter(x => x !== id); log('🏦 เลิกฝาก:', nameOf(id)); },
+    toggleDepositAfterSell(on) { CFG.depositAfterSell = !!on; saveConfigDebounced(); log('🏦 ฝากหลังขาย =', CFG.depositAfterSell); },
+    setStorageDepositMode(mode) {
+      CFG.storageDepositMode = mode === 'selected' ? 'selected' : 'all';
+      saveConfigDebounced();
+      log('🏦 Storage mode:', CFG.storageDepositMode === 'all' ? 'ฝากทุกอย่าง (กันของสวม/Weapon Set/Reserve)' : 'ฝากเฉพาะรายการ');
+    },
+    setDepositItems(...ids) { CFG.depositItemIds = ids; CFG.storageDepositMode = 'selected'; saveConfigDebounced(); log('🏦 ฝากเฉพาะ item:', ids.map(nameOf).join(', ')); },
+    addDepositItem(id) { if (!CFG.depositItemIds.includes(id)) CFG.depositItemIds.push(id); CFG.storageDepositMode = 'selected'; saveConfigDebounced(); log('🏦 เพิ่มฝาก:', nameOf(id)); },
+    removeDepositItem(id) { CFG.depositItemIds = CFG.depositItemIds.filter(x => x !== id); saveConfigDebounced(); log('🏦 เลิกฝาก:', nameOf(id)); },
     setStorageReserveItems(items) {
       CFG.storageReserveItems = normalizeStorageReserveItems(items);
       saveConfigDebounced();
       log('🏦 ไอเท็มสำรองหลังฝาก:', CFG.storageReserveItems.length ? CFG.storageReserveItems.map(i => nameOf(i.itemId) + ' ×' + i.amount).join(', ') : 'ไม่มี');
     },
     getStorageReserveItems() { return getStorageReserveItems().map(i => ({ ...i, name: nameOf(i.itemId), inStorage: storageRegularItems.get(i.itemId) || 0 })); },
+    storageStatus() {
+      const auto = storageAutoBlockers();
+      const weight = inventoryWeightPercent();
+      return {
+        state: storageState,
+        enabled: CFG.storageEnabled,
+        triggerEnabled: CFG.depositOnFull,
+        trigger: auto.trigger ? { ...auto.trigger } : null,
+        blockers: auto.blockers,
+        weight: { percent: weight == null ? null : Number(weight.toFixed(2)), current: currentWeightRaw == null ? null : currentWeightRaw / 10, max: maxWeightRaw == null ? null : maxWeightRaw / 10, source: lastWeightSource || null },
+        depositMode: storageDepositMode(),
+        depositItemsConfigured: CFG.depositItemIds.length,
+        depositItemsInInventory: storageDepositItemIds().filter(id => (inventory.get(id) || 0) > 0),
+        retryRemainingMs: Math.max(0, storageRetryAt - nowMs()),
+      };
+    },
     depositNow() {
       if (storageState !== 'IDLE') { log('⚠️ กำลังฝากอยู่แล้ว (state:', storageState + ')'); return; }
-      if (!CFG.depositItemIds.length && !getStorageReserveItems().length) { log('⚠️ ยังไม่ได้เลือกของฝากหรือไอเท็มสำรอง'); return; }
+      if (storageDepositMode() === 'selected' && !CFG.depositItemIds.length && !getStorageReserveItems().length) { log('⚠️ ยังไม่ได้เลือกของฝากหรือไอเท็มสำรอง'); return; }
       if (!currentMap || player.x == null) { log('⚠️ ยังไม่รู้พิกัดตัวละคร'); return; }
-      let hasDeposit = false;
-      for (const id of CFG.depositItemIds) { if ((inventory.get(id) || 0) > 0) { hasDeposit = true; break; } }
+      const hasDeposit = hasDepositableInventory();
       if (!hasDeposit && !getStorageReserveItems().length) { log('⚠️ ไม่มีของที่จะฝากใน inventory'); return; }
       startStorage('กดฝากเดี๋ยวนี้', null);
     },
@@ -8639,6 +9040,7 @@ function abBuffTimeoutMs() {
     setLootQueueConfig(values = {}) {
       const role = ['off', 'farm', 'collector'].includes(values.role) ? values.role : CFG.lootQueueRole;
       CFG.lootQueueRole = role;
+      if ('sendAll' in values) CFG.lootQueueSendAll = !!values.sendAll;
       const transport = ['local', 'cloudflare'].includes(values.transport) ? values.transport : lootQueueTransportMode();
       CFG.lootQueueTransport = transport;
       if ('localUrl' in values && values.localUrl) CFG.lootQueueLocalUrl = String(values.localUrl).trim();
@@ -9050,8 +9452,8 @@ function abBuffTimeoutMs() {
     //  รวม: config + skill times + nav data (buff countdown เป็น session-only)
     exportAll() {
       const data = { _version: VERSION, _exportedAt: new Date().toISOString() };
-      data.config = persistedConfig();
-      data.profiles = loadProfilesStore();
+      data.config = cloneConfigValue(persistedConfig());
+      data.profiles = normalizeProfilesPayload(loadProfilesStore());
       data.activeProfile = activeProfileName();
       const skill = {};
       for (const [id, ts] of lastSkillUse) skill[id] = ts;
@@ -9062,25 +9464,38 @@ function abBuffTimeoutMs() {
       const a = document.createElement('a');
       a.href = url; a.download = 'ro-assist-backup-' + new Date().toISOString().slice(0, 10) + '.json'; a.click();
       URL.revokeObjectURL(url);
-      log('📤 export ข้อมูลทั้งหมด: config + profiles + skill + nav');
+      const summary = backupQueueSummary(data);
+      log('📤 export ข้อมูลทั้งหมด: config ' + summary.configKeys + ' ค่า · Profile ' + summary.profileCount + ' ชุด · Loot Queue special ' + summary.configQueueItems + ' ชิ้น');
+      return summary;
     },
     importAll(json) {
       try {
         const data = typeof json === 'string' ? JSON.parse(json) : json;
         if (!data || typeof data !== 'object') throw new Error('รูปแบบผิด');
         let count = 0;
-        if (data.config) {
-          for (const k of PERSIST_KEYS) if (k in data.config) { CFG[k] = data.config[k]; count++; }
-          const importedFpsCap = fpsCap.set(CFG.renderFpsCap);
-          CFG.renderFpsCap = importedFpsCap == null ? 0 : importedFpsCap;
-          saveConfig();
+        const importedProfiles = normalizeProfilesPayload(data.profiles);
+        let migratedNoMonsterProfiles = 0;
+        for (const profile of Object.values(importedProfiles)) {
+          if (migrateNoMonsterWarpDefault(data, profile)) migratedNoMonsterProfiles++;
         }
-        if (data.profiles && typeof data.profiles === 'object' && !Array.isArray(data.profiles)) {
-          saveProfilesStore(data.profiles);
-          const requestedActive = normalizeProfileName(data.activeProfile);
-          if (requestedActive && Object.prototype.hasOwnProperty.call(data.profiles, requestedActive)) setActiveProfileName(requestedActive);
+        const requestedActive = normalizeProfileName(data.activeProfile);
+        // Import ต้องใช้ config สดเป็นหลัก แต่เติม key ที่ backup รุ่นเก่าหายจาก active profile.
+        // จึงย้าย special-item list และค่า profile ได้แม้ config ในไฟล์มีไม่ครบ.
+        const importConfig = buildImportConfig(data, importedProfiles, requestedActive);
+        if (Object.keys(importConfig).length) {
+          count += applyPersistedConfig(importConfig);
+          const importedFpsCap = setConfiguredFpsCap(CFG.renderFpsCap);
+          CFG.renderFpsCap = importedFpsCap == null ? 0 : importedFpsCap;
+          if (!saveConfig()) throw new Error('บันทึก config ลง browser ไม่สำเร็จ');
+        }
+        if (Object.keys(importedProfiles).length) {
+          // merge เพื่อไม่ลบ profile ที่มีเฉพาะในเครื่องปลายทาง; ชื่อซ้ำใช้ค่าจาก backup.
+          const profiles = loadProfilesStore();
+          Object.assign(profiles, importedProfiles);
+          if (!saveProfilesStore(profiles)) throw new Error('บันทึก Profile ลง browser ไม่สำเร็จ');
+          if (requestedActive && (requestedActive === 'default' || Object.prototype.hasOwnProperty.call(profiles, requestedActive))) setActiveProfileName(requestedActive);
           notifyProfilesChanged();
-          count += Object.keys(data.profiles).length;
+          count += Object.keys(importedProfiles).length;
         }
         // buffTimes จาก backup รุ่นเก่าถูกละเว้น: countdown เป็น session-only
         if (data.skillTimes) {
@@ -9089,9 +9504,13 @@ function abBuffTimeoutMs() {
           saveSkillTimes();
         }
         if (data.nav) { count += navImportAll(data.nav); }
-        log('📥 import ข้อมูลสำเร็จ: ' + count + ' รายการ' + (data.profiles ? ' (รวม Profile)' : ''));
+        lootQueue.reconnect();
+        const summary = backupQueueSummary({ ...data, config: importConfig, profiles: importedProfiles, activeProfile: requestedActive || activeProfileName() });
+        log('📥 import สำเร็จ: ' + count + ' รายการ · Loot Queue special ' + summary.configQueueItems + ' ชิ้น · Profile ' + summary.profileCount + ' ชุด' + (requestedActive ? ' · ใช้ ' + requestedActive : '') + (migratedNoMonsterProfiles ? ' · no-monster default 5s→2s ' + migratedNoMonsterProfiles + ' Profile' : ''));
+        return summary;
       } catch (e) { log('⚠️ import ล้มเหลว:', e.message); }
     },
+    backupStatus() { return backupQueueSummary({ config: persistedConfig(), profiles: loadProfilesStore(), activeProfile: activeProfileName() }); },
   };
 
   // ============================================================
@@ -9286,14 +9705,15 @@ function abBuffTimeoutMs() {
     popup.id = '__assist_itempopup';
     document.body.appendChild(popup);
 
-    const getList = () => listType === 'only' ? CFG.filter.onlyItems : listType === 'queue' ? CFG.lootQueueItemIds : CFG.filter.exceptItems;
+    const getList = () => listType === 'only' ? CFG.filter.onlyItems : listType === 'queue' ? CFG.lootQueueItemIds : listType === 'deposit' ? CFG.depositItemIds : CFG.filter.exceptItems;
     const setList = (arr) => {
       if (listType === 'only') CFG.filter.onlyItems = arr;
       else if (listType === 'queue') CFG.lootQueueItemIds = arr;
+      else if (listType === 'deposit') { CFG.depositItemIds = arr; CFG.storageDepositMode = 'selected'; }
       else CFG.filter.exceptItems = arr;
       saveConfigDebounced();
     };
-    const titleTxt = listType === 'only' ? 'เก็บเฉพาะ (only)' : listType === 'queue' ? 'ส่งให้ Loot Queue' : 'ยกเว้น (except)';
+    const titleTxt = listType === 'only' ? 'เก็บเฉพาะ (only)' : listType === 'queue' ? 'ส่งให้ Loot Queue' : listType === 'deposit' ? 'ฝากเฉพาะรายการ' : 'ยกเว้น (except)';
 
     function render(search) {
       const current = getList();
@@ -10007,6 +10427,7 @@ function abBuffTimeoutMs() {
       <div id="__assist_bar">
         <span class="hptext">HP ?</span>
         <div class="hpbar"><div class="hpfill" style="width:0%"></div></div>
+        <span class="pill on" data-masterbot title="หยุด/เริ่ม automation ทั้งหมด โดยไม่เปลี่ยนค่ารายระบบ">⏻ BOT: ON</span>
         <span class="pill off" data-loot>📦 Loot</span>
         <span class="pill off" data-heal>💉 Heal</span>
         <span class="pill off" data-rest>🪑 Rest</span>
@@ -10153,18 +10574,18 @@ function abBuffTimeoutMs() {
             <div class="field"><label>เช็คของใกล้พิกัดมอนที่ฆ่า (ช่อง) — นักธนูยิงไกล → ของตกที่มอน</label><input type="number" id="__assist_pickradiuskill" min="1" max="20" placeholder="5"></div>
             <div class="btns"><button id="__assist_applylootdelay">ตั้งดีเลย์</button><button id="__assist_t_lootkillpos" class="on">เช็คพิกัดมอนที่ฆ่า</button></div>
             <h4>📮 Loot Queue <span id="__assist_lootqueuestatus" style="font-size:10px;font-weight:400;color:#9aa0a6"></span></h4>
-            <div class="field"><label>หน้าที่ไอดีนี้</label><select id="__assist_lootqueuerole"><option value="off">ปิด</option><option value="farm">ฟาร์ม — ส่ง special drop</option><option value="collector">เก็บ — รับงานจากคิว</option></select></div>
+            <div class="field"><label>หน้าที่ไอดีนี้</label><select id="__assist_lootqueuerole"><option value="off">ปิด</option><option value="farm">ฟาร์ม — ส่ง drop เข้าคิว</option><option value="collector">เก็บ — รับงานจากคิว</option></select></div>
             <div class="field"><label>เส้นทางคิว</label><select id="__assist_lootqueuetransport"><option value="local">Localhost — 2 ไอดีบนเครื่องเดียวกัน (แนะนำ)</option><option value="cloudflare">Cloudflare — ใช้ข้ามเครื่อง</option></select></div>
-            <div class="btns"><button id="__assist_managequeueitems">📋 รายการไอเทมพิเศษ</button><button id="__assist_lootqueuereconnect">🔌 ต่อใหม่</button></div>
+            <div class="btns"><button id="__assist_lootqueuesendall" class="off">📦 ส่งทุกอย่าง: OFF</button><button id="__assist_managequeueitems">📋 รายการไอเทมพิเศษ</button><button id="__assist_lootqueuereconnect">🔌 ต่อใหม่</button></div>
             <div class="field" data-lootqueue-transport="local"><label>Localhost WebSocket URL</label><input type="text" id="__assist_lootqueuelocalurl" placeholder="ws://127.0.0.1:8787"></div>
             <div class="field" data-lootqueue-transport="cloudflare"><label>Cloudflare WebSocket URL (เก็บใน browser นี้ · ไม่แสดงใน log)</label><input type="password" id="__assist_lootqueuecloudflareurl" placeholder="wss://...workers.dev/?token=..."></div>
             <div class="field"><label>กลุ่มคิว (ทั้ง 2 ไอดีต้องตรงกัน)</label><input type="text" id="__assist_lootqueuegroup" placeholder="default"></div>
             <div class="field"><label>จุดรอ collector: map / X / Y</label><div style="display:flex;gap:6px"><input type="text" id="__assist_lootqueuehomemap" placeholder="prontera"><input type="number" id="__assist_lootqueuehomex" placeholder="150"><input type="number" id="__assist_lootqueuehomey" placeholder="150"></div></div>
-            <div class="field"><label>รอหลังรับงานก่อนวาร์ป (ms) — รวม drop ใกล้กันก่อนออกจากเมือง (0=ทันที)</label><input type="number" id="__assist_lootqueueclaimdelay" min="0" max="30000" step="500" placeholder="5000"></div>
-            <div class="field"><label>รอหลังเก็บสำเร็จก่อนหา job คิวถัดไป (ms) — 0=ตัดสินใจทันที</label><input type="number" id="__assist_lootqueuesettle" min="0" max="10000" step="250" placeholder="1000"></div>
+            <div class="field"><label>รอหลังรับงานก่อนวาร์ป (ms) — ใช้เฉพาะเมื่ออยู่จุดรอ/เมือง (0=ทันที)</label><input type="number" id="__assist_lootqueueclaimdelay" min="0" max="30000" step="500" placeholder="5000"></div>
+            <div class="field"><label>รอหลังทิ้งงานก่อนหา job ถัดไป (ms) — FAIL/เงียบครบ retry; เก็บสำเร็จจะต่อคิวทันที</label><input type="number" id="__assist_lootqueuesettle" min="0" max="10000" step="250" placeholder="1000"></div>
             <div class="field"><label>ดีเลย์ก่อนวาร์ป job ถัดไป (ms) — 0=วาร์ปทันที; ใช้เฉพาะ loot queue</label><input type="number" id="__assist_lootqueuewarpcooldown" min="0" max="10000" step="100" placeholder="0"></div>
-            <div class="field"><label>retry pickup หลังวาร์ป (ครั้ง) — เมื่อ server ตอบ FAIL หรือเงียบ; นับเพิ่มจากคำสั่งแรก</label><input type="number" id="__assist_lootqueuepickupretries" min="0" max="5" step="1" placeholder="3"></div>
-            <div class="field"><label>รอ action หลังส่ง pickup (ms) — ครบเวลาแล้วยังเงียบ → ทิ้งงาน</label><input type="number" id="__assist_lootqueuetimeout" min="1000" max="30000" step="500" placeholder="5000"></div>
+            <div class="field"><label>retry pickup หลังวาร์ป (ครั้ง) — รอผลทีละคำสั่งก่อน retry; นับเพิ่มจากคำสั่งแรก</label><input type="number" id="__assist_lootqueuepickupretries" min="0" max="5" step="1" placeholder="2"></div>
+            <div class="field"><label>รอผล pickup แต่ละครั้ง (ms) — ครบเวลาแล้ว retry; retry ครบจึงทิ้งงาน</label><input type="number" id="__assist_lootqueuetimeout" min="1000" max="30000" step="500" placeholder="1000"></div>
             <div class="btns"><button id="__assist_applylootqueue">บันทึก Loot Queue</button><button id="__assist_lootqueuehomecurrent">ใช้พิกัดปัจจุบันเป็นจุดรอ</button></div>
             <div id="__assist_lootqueuecurrent" style="font-size:10px;color:#9aa0a6;margin:5px 0 4px">ไม่มีงานที่กำลังเก็บ</div>
             <div class="btns"><button id="__assist_lootqueuenext" class="off" disabled title="ไม่มี drop ที่กำลังเก็บ">⏭ ข้ามงานปัจจุบัน</button></div>
@@ -10277,8 +10698,9 @@ function abBuffTimeoutMs() {
             <div class="field"><label>พิกัด Kafra X (ระบบวาร์ปข้าง ๆ +1)</label><input type="number" id="__assist_kafrax" placeholder="0=ใช้ sell"><label style="margin-left:8px">Y</label><input type="number" id="__assist_kafray" placeholder="0=ใช้ sell"><button id="__assist_usekafrapos" style="margin-left:8px;font-size:10px">ใช้พิกัดตัวละคร</button></div>
             <div class="field"><label>เมนู Kafra choice (เริ่มที่ 0 — ตั้งตาม NPC)</label><input type="number" id="__assist_kafrachoice" min="0" max="9" placeholder="0"></div>
             <div class="field"><label>เริ่มฝากเมื่อน้ำหนักถึง % (0=ปิด)</label><input type="number" id="__assist_depositweight" min="0" max="100" step="1" placeholder="90"></div>
-            <div class="field"><label>ไอเท็มสำรองหลังฝาก (Item ID:จำนวนติดตัว)</label><input type="text" id="__assist_storagereserve" placeholder="509:50, 656:10"><small>ฝากเสร็จจะหยิบกลับเฉพาะส่วนที่ขาด เช่น White Herb 50, Awakening Potion 10</small></div>
-            <div class="btns"><button id="__assist_applykafra">ใช้ค่า storage</button><button id="__assist_t_depfull" class="on">ฝากเมื่อเต็ม/ถึงน้ำหนัก</button><button id="__assist_t_depaftersell" class="on">ฝากหลังขาย</button></div>
+            <div class="field"><label>โหมดฝากของ</label><select id="__assist_storagedepositmode"><option value="all">ฝากทุกอย่าง — กันของสวม/Weapon Set/Reserve</option><option value="selected">ฝากเฉพาะรายการ</option></select><small>โหมดฝากทุกอย่างจะฝาก stackable ทุกชิ้นที่เกินยอดสำรอง และอุปกรณ์ที่ไม่สวมอยู่เท่านั้น</small></div>
+            <div class="field"><label>ไอเท็มสำรองติดตัว (Item ID:จำนวน)</label><input type="text" id="__assist_storagereserve" placeholder="509:50, 656:10"><small>ระบบจะกันยอดนี้ไว้ก่อนฝาก เช่น White Herb 50, Awakening Potion 10</small></div>
+            <div class="btns"><button id="__assist_applykafra">ใช้ค่า storage</button><button id="__assist_managedeposititems">📋 รายการฝากเฉพาะ</button><button id="__assist_t_depfull" class="on">ฝากเมื่อเต็ม/ถึงน้ำหนัก</button><button id="__assist_t_depaftersell" class="on">ฝากหลังขาย</button></div>
           </div>
           <!-- 🤖 Auto Login / Recovery -->
           <div class="__assist_subpage" data-sub="auto">
@@ -10368,7 +10790,7 @@ function abBuffTimeoutMs() {
               <button id="__assist_exportall">📤 export ทั้งหมด</button>
               <button id="__assist_importall">📥 import</button>
             </div>
-            <div style="font-size:10px;color:#9aa0a6;margin-top:4px;">★ export รวม config + Profile + skill times + nav data<br>★ import = ทับค่าปัจจุบันและ Profile ที่มีชื่อซ้ำ</div>
+            <div style="font-size:10px;color:#9aa0a6;margin-top:4px;">★ export รวม config + Profile + รายการ Loot Queue + skill times + nav data<br>★ import = ทับค่าปัจจุบัน, เติมค่าเก่าที่ขาดจาก active Profile และทับเฉพาะ Profile ที่ชื่อซ้ำ</div>
           </div>
           <!-- 📨 Telegram -->
           <div class="__assist_subpage" data-sub="telegram">
@@ -10599,6 +11021,7 @@ function abBuffTimeoutMs() {
       // กดที่ pill loot/heal ใน mini-bar = toggle ทันที (ไม่เปิด popup)
       const pill = e.target.closest('.pill');
       if (pill) {
+        if (pill.hasAttribute('data-masterbot')) { masterBot.setEnabled(!masterBot.enabled()); return; }
         if (pill.hasAttribute('data-loot')) CFG.lootEnabled ? ASSIST.lootOff() : ASSIST.lootOn();
         if (pill.hasAttribute('data-heal')) CFG.healEnabled ? ASSIST.healOff() : ASSIST.healOn();
         if (pill.hasAttribute('data-rest')) CFG.restEnabled ? ASSIST.restOff() : ASSIST.restOn();
@@ -10704,6 +11127,11 @@ function abBuffTimeoutMs() {
     root.querySelector('#__assist_manageonly').addEventListener('click', () => openItemListPopup('only'));
     root.querySelector('#__assist_manageexcept').addEventListener('click', () => openItemListPopup('except'));
     root.querySelector('#__assist_managequeueitems').addEventListener('click', () => openItemListPopup('queue'));
+    root.querySelector('#__assist_lootqueuesendall').addEventListener('click', () => {
+      CFG.lootQueueSendAll = !CFG.lootQueueSendAll;
+      saveConfigDebounced();
+      log('📮 Loot Queue farm:', CFG.lootQueueSendAll ? 'ส่งทุกอย่าง' : 'ส่งเฉพาะรายการพิเศษ');
+    });
     root.querySelector('#__assist_lootqueuereconnect').addEventListener('click', () => lootQueue.reconnect());
     root.querySelector('#__assist_lootqueuenext').addEventListener('click', () => lootQueue.skipCurrent());
     root.querySelector('#__assist_lootqueuetransport').addEventListener('change', (event) => {
@@ -10715,6 +11143,7 @@ function abBuffTimeoutMs() {
     root.querySelector('#__assist_applylootqueue').addEventListener('click', () => {
       ASSIST.setLootQueueConfig({
         role: root.querySelector('#__assist_lootqueuerole').value,
+        sendAll: CFG.lootQueueSendAll,
         transport: root.querySelector('#__assist_lootqueuetransport').value,
         localUrl: root.querySelector('#__assist_lootqueuelocalurl').value.trim(),
         cloudflareUrl: root.querySelector('#__assist_lootqueuecloudflareurl').value.trim(),
@@ -10852,6 +11281,7 @@ function abBuffTimeoutMs() {
     // ---- storage wires ----
     root.querySelector('#__assist_storagebtn').addEventListener('click', () => CFG.storageEnabled ? ASSIST.storageOff() : ASSIST.storageOn());
     root.querySelector('#__assist_depositnow').addEventListener('click', () => ASSIST.depositNow());
+    root.querySelector('#__assist_managedeposititems').addEventListener('click', () => openItemListPopup('deposit'));
     root.querySelector('#__assist_applykafra').addEventListener('click', () => {
       const kn = root.querySelector('#__assist_kafra').value.trim();
       const km = root.querySelector('#__assist_kaframap').value.trim();
@@ -10860,6 +11290,7 @@ function abBuffTimeoutMs() {
       const kc = parseInt(root.querySelector('#__assist_kafrachoice').value, 10);
       const weightPct = parseInt(root.querySelector('#__assist_depositweight').value, 10);
       const reserveText = root.querySelector('#__assist_storagereserve').value;
+      ASSIST.setStorageDepositMode(root.querySelector('#__assist_storagedepositmode').value);
       if (kn) ASSIST.setKafra(kn, km);
       if (!isNaN(kx) && !isNaN(ky)) ASSIST.setKafraPos(kx, ky);
       if (!isNaN(kc)) CFG.kafraChoice = kc;
@@ -11550,7 +11981,8 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     }
     root.querySelectorAll('.pill').forEach(p => {
       let on, label;
-      if (p.hasAttribute('data-loot')) { on = CFG.lootEnabled; label = '📦 Loot'; }
+      if (p.hasAttribute('data-masterbot')) { on = masterBot.enabled(); label = '⏻ BOT'; }
+      else if (p.hasAttribute('data-loot')) { on = CFG.lootEnabled; label = '📦 Loot'; }
       else if (p.hasAttribute('data-heal')) { on = CFG.healEnabled; label = '💉 Heal'; }
       else if (p.hasAttribute('data-rest')) { on = CFG.restEnabled; label = '🪑 Rest'; }
       else if (p.hasAttribute('data-combat')) { on = CFG.combatEnabled; label = '⚔️ Combat'; }
@@ -11575,7 +12007,10 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
       }
       else return;
       p.className = 'pill ' + (on ? 'on' : 'off');
-      if (p.hasAttribute('data-weapon')) {
+      if (p.hasAttribute('data-masterbot')) {
+        p.textContent = label + ': ' + (on ? 'ON' : 'PAUSED');
+        p.title = on ? 'คลิกเพื่อหยุด automation ทั้งหมด' : 'คลิกเพื่อเริ่ม automation ตามค่าระบบเดิม';
+      } else if (p.hasAttribute('data-weapon')) {
         p.textContent = label;
         p.title = weaponSwap ? 'กำลังเปลี่ยน Weapon Set' : 'คลิกเพื่อตั้ง Weapon Set';
       } else {
@@ -11666,6 +12101,18 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     if (warpBtn) { warpBtn.textContent = 'วาร์ปไปเก็บของ: ' + (CFG.warpLootEnabled ? 'ON' : 'OFF') + (warpQueue.size ? ` (${warpQueue.size})` : ''); warpBtn.className = CFG.warpLootEnabled ? 'on' : 'off'; }
     const lootQueueRole = root.querySelector('#__assist_lootqueuerole');
     if (lootQueueRole && !isEditing(lootQueueRole)) lootQueueRole.value = CFG.lootQueueRole;
+    const lootQueueSendAllBtn = root.querySelector('#__assist_lootqueuesendall');
+    if (lootQueueSendAllBtn) {
+      const enabled = !!CFG.lootQueueSendAll;
+      const farmer = CFG.lootQueueRole === 'farm';
+      lootQueueSendAllBtn.textContent = '📦 ส่งทุกอย่าง: ' + (enabled ? 'ON' : 'OFF');
+      lootQueueSendAllBtn.className = enabled ? 'on' : 'off';
+      lootQueueSendAllBtn.disabled = !farmer;
+      lootQueueSendAllBtn.style.opacity = farmer ? '' : '.55';
+      lootQueueSendAllBtn.title = farmer
+        ? 'เปิดแล้วส่ง drop ทุกชนิดเข้าคิว; รายการพิเศษจะยังถูกเก็บไว้'
+        : 'มีผลเมื่อเลือกหน้าที่เป็น ฟาร์ม เท่านั้น';
+    }
     const lootQueueTransportSelect = root.querySelector('#__assist_lootqueuetransport');
     if (lootQueueTransportSelect && !isEditing(lootQueueTransportSelect)) lootQueueTransportSelect.value = lootQueueTransportMode();
     root.querySelectorAll('[data-lootqueue-transport]').forEach(el => {
@@ -11688,11 +12135,12 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
         const job = status.activeJob;
         const phase = status.claimPendingId ? 'รอ claimed ' + Math.ceil(status.claimPendingRemainingMs / 1000) + 's'
           : status.claimDelayRemainingMs > 0 ? 'รอรวม drop ' + Math.ceil(status.claimDelayRemainingMs / 1000) + 's'
-          : status.nearbySettleRemainingMs > 0 ? 'รอหา job คิวถัดไป ' + Math.ceil(status.nearbySettleRemainingMs / 1000) + 's' : status.activeStage;
+          : status.nearbySettleRemainingMs > 0 ? 'กำลังต่อ job คิวถัดไป' : status.activeStage;
         currentEl.textContent = job
           ? 'กำลังเก็บ: ' + job.itemName + '(#' + job.itemId + ') @ ' + job.map + ' (' + Math.round(job.x) + ',' + Math.round(job.y) + ')' + (phase ? ' · ' + phase : '')
           : status.returningHome ? 'กำลังกลับจุดรอ: ' + CFG.lootQueueHomeMap + (phase ? ' · ' + phase : '')
-            : 'ไม่มีงานที่กำลังเก็บ' + (status.availableJobs ? ' · รอในคิว ' + status.availableJobs : '');
+            : status.nextClaimRemainingMs > 0 ? 'ทิ้งงานแล้ว · รอ ' + Math.ceil(status.nextClaimRemainingMs / 1000) + 's ก่อนมองคิวถัดไป'
+              : 'ไม่มีงานที่กำลังเก็บ' + (status.availableJobs ? ' · รอในคิว ' + status.availableJobs : '');
         currentEl.style.color = job || status.returningHome ? '#f2ba6d' : '#9aa0a6';
       }
       const nextBtn = root.querySelector('#__assist_lootqueuenext');
@@ -11881,6 +12329,8 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     syncInput('#__assist_kafray', CFG.kafraMapY);
     syncInput('#__assist_kafrachoice', CFG.kafraChoice);
     syncInput('#__assist_depositweight', CFG.depositWeightPercent);
+    const storageMode = root.querySelector('#__assist_storagedepositmode');
+    if (storageMode && !isEditing(storageMode)) storageMode.value = storageDepositMode();
     syncInput('#__assist_storagereserve', storageReserveItemsText());
     syncToggle('#__assist_t_depfull', CFG.depositOnFull);
     syncToggle('#__assist_t_depaftersell', CFG.depositAfterSell);
