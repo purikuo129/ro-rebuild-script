@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.0.3
+// @version      1.0.4
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -102,6 +102,7 @@
      ASSIST.setLootQueueConfig({role:'farm', group:'party-a'})
      ASSIST.setLootQueueConfig({role:'collector', group:'party-a', homeMap:'prontera', homeX:150, homeY:150})
      ASSIST.lootQueueStatus()          // ดูการเชื่อมต่อ/งานที่กำลังทำ
+     ASSIST.teleportStatus()           // ดูคำสั่งวาร์ปที่กำลังรอยืนยัน
      ASSIST.lootQueueNext()            // ทิ้งงานปัจจุบัน (เมื่อ drop หาย/บอทค้าง) แล้วไปงานถัดไป
 
    --------------------------------------------------------------------------
@@ -123,7 +124,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.0.3';
+  const VERSION = '1.0.4';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // keys ที่บันทึก/โหลด (boolean/number/array/string — ไม่เก็บ function หรือ object ซ้อน)
@@ -717,11 +718,13 @@
   const player = { x: null, y: null }; // ตำแหน่งตัวเรา
   let lastPlayerPositionChangedAt = 0; // เวลา player ขยับจริงล่าสุด (สำหรับ lock สกิลระหว่างเดิน)
   let lastPlayerPositionPacketAt = 0;  // packet ตำแหน่งล่าสุด (ใช้จับ action ของ Loot Queue)
+  let teleportCoordinator = null;      // สร้างหลัง state วาร์ปพร้อม; setPlayerPosition แจ้งการยืนยันพิกัดสดได้
   function setPlayerPosition(x, y) {
     lastPlayerPositionPacketAt = nowMs();
     if (player.x !== x || player.y !== y) lastPlayerPositionChangedAt = nowMs();
     player.x = x;
     player.y = y;
+    teleportCoordinator?.onPlayerPosition(x, y, lastPlayerPositionPacketAt);
   }
 
   // ============================================================
@@ -1517,10 +1520,11 @@
       pickupPending = null;
       lootSettleUntil = 0;
 
-    // 2. ล้าง Entities และเป้าหมายมอนสเตอร์ทั้งหมด (ป้องกัน Stale/Ghost Entity)
-    const myEntry = playerId != null ? entities.get(playerId) : null;
+    // 2. ล้าง Entities และเป้าหมายทั้งหมด รวม self entity เก่าด้วย.
+    // playerId/player.x/y เป็น state คนละชุดและยังอยู่เพื่อให้ warp guard เปรียบเทียบ
+    // แต่ entity เก่ามาจากแมปเดิม ห้ามคืนเข้า map ใหม่: รอ SPAWN/MOVE/self marker สดเท่านั้น.
     entities.clear();
-    if (myEntry) entities.set(playerId, myEntry); // เก็บข้อมูลตัวเองไว้
+    radarPlayerIds.clear();
     warpToMonsterCount.clear(); // entity ID อาจถูก server นำกลับมาใช้หลังวาร์ป
 
     monsterAggro.clear();
@@ -1533,21 +1537,9 @@
     movementPlanner.reset();
   }
 
-  // ★ ส่งคำสั่งวาร์ป: packet 0x40, [40][len:2 LE][mapname UTF-8][x:i16 LE][y:i16 LE][00]
+  // ★ ส่ง packet วาร์ปจริงเท่านั้น — caller ทุกจุดต้องผ่าน Teleport coordinator ด้านล่าง
   //   x/y เป็น signed int16 (-999 = random) — format ยืนยันจากบอทหลักแล้ว
-  function sendTeleport(mapName, x, y) {
-    if (!activeWS || activeWS.readyState !== 1) {
-      log('⚠️ ส่งวาร์ปไม่ได้: game socket ยังไม่พร้อม');
-      return false;
-    }
-    if (!mapName) {
-      log('⚠️ ส่งวาร์ปไม่ได้: ยังไม่รู้ชื่อแมป');
-      return false;
-    }
-
-    // ★ เคลียร์ Queue และ Entities ก่อนส่งแพ็กเกจวาร์ป
-    clearWarpState();
-
+  function sendTeleportPacket(mapName, x, y) {
     const mapBytes = new TextEncoder().encode(mapName);
     const b = new Uint8Array(1 + 2 + mapBytes.length + 2 + 2 + 1);
     let p = 0;
@@ -1558,6 +1550,116 @@
     writeI16LE(b, p, Math.round(y)); p += 2;
     b[p] = 0x00;
     activeWS.send(b);
+  }
+
+  // ============================================================
+  //  TELEPORT COORDINATOR — มีสิทธิ์ส่ง cross-map/exact teleport เพียงงานเดียว
+  //  interface: request(map, x, y, reason?) -> true เฉพาะเมื่อ packet ถูกส่งจริง
+  //  caller เดิมมี retry/state machine ของตัวเองอยู่แล้ว จึงคืน false ระหว่าง hold
+  //  เพื่อไม่ให้ caller เริ่ม timeout นับก่อน server ได้รับคำสั่งจริง.
+  // ============================================================
+  const TELEPORT_CROSS_MAP_GAP_MS = 3000;
+  const TELEPORT_CONFIRM_TIMEOUT_MS = 6000;
+  teleportCoordinator = (() => {
+    let active = null;
+    let lastCrossMapSentAt = 0;
+    let lastHoldKey = '';
+    let lastHoldLogAt = 0;
+    const isSameMapRandom = (request) => request.map === currentMap && request.x === -999 && request.y === -999;
+    const sameDestination = (a, b) => a && b && a.map === b.map && a.x === b.x && a.y === b.y;
+    const logHold = (request, why, now) => {
+      const key = request.map + ':' + request.x + ':' + request.y + ':' + why;
+      if (key === lastHoldKey && now - lastHoldLogAt < 1000) return;
+      lastHoldKey = key; lastHoldLogAt = now;
+      log('🌀 Teleport: hold', request.map, '@(', request.x, request.y + ')', '—', why);
+    };
+    const confirm = (why) => {
+      if (!active) return false;
+      log('🌀 Teleport: ยืนยัน', active.map, '@(', active.x, active.y + ')', '—', why);
+      active = null;
+      return true;
+    };
+    const request = (mapName, x, y, reason = 'system') => {
+      if (!activeWS || activeWS.readyState !== WebSocket.OPEN) {
+        log('⚠️ ส่งวาร์ปไม่ได้: game socket ยังไม่พร้อม');
+        return false;
+      }
+      if (!mapName) {
+        log('⚠️ ส่งวาร์ปไม่ได้: ยังไม่รู้ชื่อแมป');
+        return false;
+      }
+      const now = nowMs();
+      const next = { map: String(mapName), x: Math.round(x), y: Math.round(y), reason, requestedAt: now };
+      if (active) {
+        logHold(next, sameDestination(active, next) ? 'รอยืนยันคำสั่งเดิม' : 'คำสั่งวาร์ปอื่นกำลังทำงาน', now);
+        return false;
+      }
+      const crossMap = !currentMap || next.map !== currentMap;
+      if (crossMap && now - lastCrossMapSentAt < TELEPORT_CROSS_MAP_GAP_MS) {
+        logHold(next, 'เว้นระยะ cross-map ' + TELEPORT_CROSS_MAP_GAP_MS + 'ms', now);
+        return false;
+      }
+
+      // clear state เฉพาะเมื่อส่ง packet จริง ไม่ใช่แค่ caller ขอวาร์ประหว่าง hold.
+      clearWarpState();
+      sendTeleportPacket(next.map, next.x, next.y);
+      startTeleportGuard();
+      if (crossMap) lastCrossMapSentAt = now;
+      // วาร์ปสุ่มในแมปเดิมไม่ต้องรอ MAP_NAME และห้าม block safety flee/warp-find รอบถัดไป.
+      if (!isSameMapRandom(next)) {
+        active = { ...next, crossMap, sentAt: now, positionAt: lastPlayerPositionPacketAt, fromMap: currentMap };
+      }
+      log('🌀 Teleport: ส่ง', next.map, '@(', next.x, next.y + ')', '—', reason);
+      return true;
+    };
+    return {
+      request,
+      onMapChanged(mapName) {
+        if (active && active.crossMap && mapName === active.map && mapName !== active.fromMap) confirm('MAP_NAME');
+      },
+      onPlayerPosition(_x, _y, packetAt) {
+        // exact warp ในแมปเดิมไม่มี MAP_NAME; รับตำแหน่งสดหลังส่งเป็น confirmation.
+        if (active && !active.crossMap && currentMap === active.map && packetAt > active.positionAt) confirm('พิกัดสด');
+      },
+      onWarpFail() {
+        if (!active) return false;
+        log('⚠️ Teleport: server ปฏิเสธ', active.map, '@(', active.x, active.y + ')');
+        active = null;
+        return true;
+      },
+      tick(now = nowMs()) {
+        if (active && now - active.sentAt >= TELEPORT_CONFIRM_TIMEOUT_MS) {
+          log('⚠️ Teleport: รอยืนยันเกิน ' + (TELEPORT_CONFIRM_TIMEOUT_MS / 1000).toFixed(0) + 's → ปล่อยให้ flow เจ้าของ retry', active.map);
+          active = null;
+        }
+      },
+      status() {
+        const now = nowMs();
+        return {
+          active: active && { map: active.map, x: active.x, y: active.y, reason: active.reason, crossMap: active.crossMap, remainingMs: Math.max(0, TELEPORT_CONFIRM_TIMEOUT_MS - (now - active.sentAt)) },
+          crossMapGapRemainingMs: Math.max(0, TELEPORT_CROSS_MAP_GAP_MS - (now - lastCrossMapSentAt)),
+        };
+      },
+    };
+  })();
+
+  function sendTeleport(mapName, x, y, reason) {
+    return teleportCoordinator.request(mapName, x, y, reason);
+  }
+
+  function tickTeleportCoordinator(now) {
+    teleportCoordinator?.tick(now);
+  }
+
+  function confirmTeleportMapChange(mapName) {
+    teleportCoordinator?.onMapChanged(mapName);
+  }
+
+  function rejectActiveTeleport() {
+    teleportCoordinator?.onWarpFail();
+  }
+
+  function startTeleportGuard() {
     // ★ ตั้ง warp guard — หลังวาร์ป player.x/y จะค้างจนกว่า server จะส่ง MOVE_UPDATE ใหม่
     //   combatLoop จะรอจนกว่า player pos จะเปลี่ยนจากก่อนวาร์ป ก่อนคำนวณ dist/ตี
     warpGuardUntil = nowMs() + 3000;          // หมดเวลา 3s กันค้าง (ถ้า server ไม่ส่ง pos ใหม่)
@@ -1565,7 +1667,6 @@
     postWarpFleeScanPending = true;
     postWarpTargetSettlePending = true;
     postWarpTargetSettleUntil = 0;
-    return true;
   }
 
   // ============================================================
@@ -1792,7 +1893,7 @@
         activeJob = null; idleReturnAt = nowMs(); return;
       }
       if (homeReturn) { activeJob = null; return; }
-      if (sendTeleport(CFG.lootQueueHomeMap, CFG.lootQueueHomeX, CFG.lootQueueHomeY)) {
+      if (sendTeleport(CFG.lootQueueHomeMap, CFG.lootQueueHomeX, CFG.lootQueueHomeY, 'loot-queue-home')) {
         homeReturn = { requestedAt: nowMs(), attempts: 1, retryAt: 0, fromMap: currentMap };
         activeJob = null;
         idleReturnAt = 0;
@@ -1821,7 +1922,7 @@
         idleReturnAt = now + 5000;
         return true;
       }
-      if (sendTeleport(homeMap, CFG.lootQueueHomeX, CFG.lootQueueHomeY)) {
+      if (sendTeleport(homeMap, CFG.lootQueueHomeX, CFG.lootQueueHomeY, 'loot-queue-home-retry')) {
         homeReturn.attempts++;
         homeReturn.requestedAt = now;
         homeReturn.retryAt = 0;
@@ -1981,7 +2082,7 @@
           if (next && claim(next)) return;
           if (!idleReturnAt || nowMs() < idleReturnAt) return;
           idleReturnAt = 0;
-          if (CFG.lootQueueHomeMap && currentMap !== CFG.lootQueueHomeMap && sendTeleport(CFG.lootQueueHomeMap, CFG.lootQueueHomeX, CFG.lootQueueHomeY)) {
+          if (CFG.lootQueueHomeMap && currentMap !== CFG.lootQueueHomeMap && sendTeleport(CFG.lootQueueHomeMap, CFG.lootQueueHomeX, CFG.lootQueueHomeY, 'loot-queue-idle-home')) {
             homeReturn = { requestedAt: nowMs(), attempts: 1, retryAt: 0, fromMap: currentMap };
             log('📮 Loot Queue: ไม่มีงานถัดไป → กลับจุดรอ (รอยืนยัน 1/' + MAX_WARP_ATTEMPTS + ')');
           }
@@ -2031,7 +2132,7 @@
           if (now >= retryAt && now - lastWarpAt > cooldownMs) {
             const warpX = useRandomSpawn ? -999 : job.x;
             const warpY = useRandomSpawn ? -999 : job.y;
-            if (sendTeleport(job.map, warpX, warpY)) {
+            if (sendTeleport(job.map, warpX, warpY, 'loot-queue-job')) {
               activeJob.warpAttempts++;
               activeJob.warpRequestedAt = now;
               activeJob.warpRetryAt = 0;
@@ -2057,7 +2158,7 @@
             stage('same-map-warp-wait', 'ของไกล ' + sameMapDistance.toFixed(1) + ' ช่อง → รอ cooldown วาร์ป');
             return;
           }
-          if (sendTeleport(job.map, job.x, job.y)) {
+          if (sendTeleport(job.map, job.x, job.y, 'loot-queue-same-map')) {
             activeJob.intraMapWarpAttempted = true;
             activeJob.intraMapWarpRequestedAt = now;
             activeJob.intraMapWarpPositionAt = lastPlayerPositionPacketAt;
@@ -2174,6 +2275,7 @@
   // packet ตำแหน่งอย่างเดียว (MOVE / ENTITY_POS) ไม่ได้บอก CharacterType
   // จึงห้ามเดาเป็นมอนสเตอร์: รอ SPAWN หรือ marker ที่ยืนยันชนิดก่อน
   function updateKnownEntityPosition(id, x, y, now = nowMs()) {
+    if (id === FAIL) return;  // sentinel จาก protocol ไม่ใช่ entity ที่เดิน/ตีได้
     if (id === playerId) {
       setPlayerPosition(x, y);
       const self = entities.get(id);
@@ -2191,6 +2293,27 @@
       return;
     }
     entities.set(id, { id, kind: null, x, y, alive: true, _lastSeenAt: now, _provisional: true });
+  }
+
+  // 0x3c marker flag=1 คือ radar ที่ยืนยันว่า id นี้เป็นผู้เล่น แม้ entity เก่าจะเคย
+  // ถูก parse เป็น monster มาก่อนก็ตาม. เก็บ TTL เพื่อกัน ID reuse ที่ไม่มี despawn.
+  function rememberRadarPlayer(id, x, y, now = nowMs()) {
+    if (!id || id === FAIL) return;
+    radarPlayerIds.set(id, now + RADAR_PLAYER_TTL_MS);
+    let entity = entities.get(id);
+    if (entity) {
+      entity.kind = 0;
+      entity.x = x;
+      entity.y = y;
+      entity.alive = true;
+      entity._lastSeenAt = now;
+      entity._radarPlayer = true;
+    } else {
+      entity = { id, kind: 0, x, y, alive: true, _lastSeenAt: now, _radarPlayer: true, name: '' };
+      entities.set(id, entity);
+    }
+    if (id === playerId) setPlayerPosition(x, y);
+    else instantFleeCheck(entity);
   }
 
   function tryClaim(d) {
@@ -2248,6 +2371,11 @@
   // Loot queue, pickup ที่รอผล หรือช่วงรอ drop หลัง kill ล้วนห้ามส่ง Attack/Skill/MOVE ไปเป้าใหม่
   function isLootCommandLocked(now = nowMs()) {
     return CFG.lootEnabled && (now < lootSettleUntil || queue.size > 0 || pickupPending != null || warpQueue.size > 0);
+  }
+  // Rest ไม่ควรตัด normal auto-loot ที่อยู่ตรงหน้า: ต่างจาก warpQueue ซึ่งอาจใช้เวลานาน
+  // จึงรอเฉพาะ drop ปกติ, ผล pickup และ quiet window หลังฆ่า แล้วค่อยกลับไปนั่งพัก.
+  function shouldDeferRestForNormalLoot(now = nowMs()) {
+    return CFG.lootEnabled && (now < lootSettleUntil || queue.size > 0 || pickupPending != null);
   }
 
   // PENDING_IDLE ยังอยู่แมปฟาร์มและปล่อยงานเดิมให้จบ จึงยังไม่ hold Flee Player
@@ -2777,14 +2905,14 @@
         if (name && name !== currentMap) {
           const prevMap = currentMap;
           currentMap = name;
+          confirmTeleportMapChange(name);
           lootQueue.onMapChanged(name);
           log('🗺️ แมป:', name);
           // ★★★ clear entities ของแมปเก่า — กัน monster ค้างติดมาแมปใหม่ (mirror world.js:293-306)
           //   ปัญหา: ไม่ clear → Merman/Strouf จากแมปเก่ายังค้าง → บอทพยายามตีมอนที่ไม่มีจริง
-          //   ★ เก็บตัวเองไว้ (re-add self หลัง clear)
-          const myEntry = playerId != null ? entities.get(playerId) : null;
           entities.clear();
-          if (myEntry) entities.set(playerId, myEntry);
+          radarPlayerIds.clear();
+          // self entity ของแมปเก่าก็ห้ามค้างข้ามมา: playerId ยังอยู่ และ packet สดจะสร้างใหม่.
           warpToMonsterCount.clear(); // เปลี่ยนแมป = entity ชุดใหม่ ห้าม inherit quota วาร์ป
           monsterAggro.clear(); mobAttackers.clear();
           target = null;
@@ -2799,7 +2927,7 @@
               && name !== CFG.sellNpcMap && name !== CFG.kafraMap
               && !(isOreRefineActive() && name === CFG.oreRefineMap)) {
             log('🌀 อยู่แมปผิด (' + name + '≠' + CFG.farmMap + ') → วาร์ปกลับ');
-            sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY);
+            sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY, 'farm-map-guard');
             lastFarmWarpBackAt = nowMs();
           }
         }
@@ -2818,12 +2946,13 @@
       if (u.length >= 7 + mapLen && mapLen > 0) {
         let name = new TextDecoder().decode(u.slice(7, 7 + mapLen));
         name = name.split('\0')[0];   // ตัดที่ null terminator
-        if (name && name !== currentMap) { currentMap = name; lootQueue.onMapChanged(name); movementPlanner.reset(); log('🗺️ แมป:', name, '(จาก SELECT_CHAR)'); }
+        if (name && name !== currentMap) { currentMap = name; confirmTeleportMapChange(name); lootQueue.onMapChanged(name); movementPlanner.reset(); log('🗺️ แมป:', name, '(จาก SELECT_CHAR)'); }
       }
     }
     // 0x2a WARP_FAIL: server บอกว่าพิกัดวาร์ป invalid (กำแพง/น้ำ) → warpLoop จะลอง offset ถัดไป
     //   format: [2a][02]
     else if (op === 0x2a && u.length >= 2) {
+      rejectActiveTeleport();
       if (lootQueue.onWarpFail()) return;
       if (lastWarpTargetId != null) {
         const wit = warpQueue.get(lastWarpTargetId);
@@ -3025,16 +3154,9 @@
             else { entities.set(eid, { id: eid, kind: 1, x: ex, y: ey, alive: true, _lastSeenAt: now, _isMiniBoss: true, name: 'Mini Boss' }); }
           } else if (eflag === 1) {
             // ★ flag=1 = ผู้เล่นบนแมป (รวมตัวเรา) → track เป็น kind=0
-            let m = entities.get(eid);
-            if (m) { m.x = ex; m.y = ey; m._lastSeenAt = now; }
-            else { entities.set(eid, { id: eid, kind: 0, x: ex, y: ey, alive: true, _lastSeenAt: now, name: '' }); }
             // Self beacon มักมาแทน MOVE_UPDATE หลังวาร์ป/เดิน จึงต้อง sync
             // ตัวแปรกลางด้วย ไม่เช่น combat/wander จะใช้พิกัดเก่าจน server เมิน 0x07.
-            if (eid === playerId) setPlayerPosition(ex, ey);
-            else {
-              const playerEntity = entities.get(eid);
-              if (playerEntity) instantFleeCheck(playerEntity);
-            }
+            rememberRadarPlayer(eid, ex, ey, now);
           }
         }
       } else if (sub === 1 && u.length >= 12) {
@@ -3045,14 +3167,7 @@
         if (id && x >= -500 && x <= 1000 && y >= -500 && y <= 1000 && (flag === 1 || flag === 3 || flag === 4)) {
           if (flag === 1) {
             // ★ flag=1 = ผู้เล่นบนแมป (รวมตัวเรา) → track เป็น kind=0
-            let m = entities.get(id);
-            if (m) { m.x = x; m.y = y; m._lastSeenAt = now; }
-            else { entities.set(id, { id, kind: 0, x, y, alive: true, _lastSeenAt: now, name: '' }); }
-            if (id === playerId) setPlayerPosition(x, y);
-            else {
-              const playerEntity = entities.get(id);
-              if (playerEntity) instantFleeCheck(playerEntity);
-            }
+            rememberRadarPlayer(id, x, y, now);
           } else {
             // ★ flag=3 = Mini Boss, flag=4 = Boss
             const isRealBoss = (flag === 4);
@@ -3078,7 +3193,7 @@
               if (d > 10) {
                 const label = isRealBoss ? '👑 Boss' : '👹 Mini Boss';
                 log(label + ' → วาร์ปไปสู้ @(', x, y, ') ห่าง', d.toFixed(0), 'ช่อง');
-                sendTeleport(currentMap, x, y);
+                sendTeleport(currentMap, x, y, 'boss-engage');
                 lastBossWarpAt = now;
               }
             }
@@ -3249,6 +3364,7 @@
                 log('🔄 player_id เปลี่ยน:', playerId.toString(16), '→', id.toString(16));
                 stalePlayerIds.set(playerId, nowMs() + 300000);
                 entities.clear();
+                radarPlayerIds.clear();
                 monsterAggro.clear(); mobAttackers.clear();
                 warpToMonsterCount.clear();
                 playerId = id; relayRegisterPlayer();
@@ -3256,6 +3372,11 @@
                 hp.cur = null; hp.max = null;
               }
             }
+          }
+          // marker radar ระบุว่าเป็นผู้เล่นแล้ว: อย่าให้ SPAWN ที่ parse ผิดแปลงกลับเป็น monster
+          if (kind === 1 && isRadarPlayerId(id, nowMs())) {
+            dbg('🛡️ Entity guard: ข้าม SPAWN monster ของ radar player', id.toString(16));
+            return;
           }
           let x = null, y = null, hp = null, hpMax = null;
           // x/y/hp/hpMax relative to nameEnd (kind @ nameEnd+2 → data เริ่ม nameEnd+3)
@@ -3497,6 +3618,7 @@
         if (e._isMiniBoss || e._isBoss) { bossAlertedIds.delete(id); log((e._isBoss ? '👑 Boss' : '👹 Mini Boss') + ' ตาย — จะ alert ใหม่เมื่อเกิดใหม่'); }
       }
       entities.delete(id);
+      radarPlayerIds.delete(id);
       warpToMonsterCount.delete(id); // มอนตายแล้ว ID นี้อาจถูกนำไป spawn ตัวใหม่ได้
       // ★ นับ kill — ถ้าเป็นมอน (kind=1) และเรามี target หรือ mobAttacker ตัวนี้
       if (e && e.kind === 1) {
@@ -3542,6 +3664,7 @@
             return;
           }
           entities.delete(id);
+          radarPlayerIds.delete(id);
           warpToMonsterCount.delete(id);
           monsterAggro.delete(id);
           mobAttackers.delete(id);
@@ -3572,7 +3695,7 @@
   //  observation/capture แยกจาก protocol implementation เพื่อเพิ่ม handler ได้โดยไม่แตะ WebSocket hook
   // ============================================================
   const gamePacketRuntime = (() => {
-    const inboundObservers = [captureWeaponInbound, captureInventoryInbound, captureStorageInbound, captureOreRefineInbound];
+    const inboundObservers = [captureWeaponInbound, captureInventoryInbound, captureStorageInbound, captureOreRefineInbound, captureStatInbound];
     const outboundObservers = [captureWeaponPacket, captureOreRefineOutbound];
     const observe = (observers, packet) => observers.forEach(observer => observer(packet));
     return {
@@ -3591,6 +3714,50 @@
   })();
   function handleIn(u) { return gamePacketRuntime.receiveInbound(u); }
   function handleOut(u) { return gamePacketRuntime.receiveOutbound(u); }
+
+  // ---------- STAT (0x25) capture — observation only, before changing the HP router ----------
+  // เซิร์ฟเวอร์อาจเปลี่ยน layout/ความหมายของ statType ได้ จึงเก็บ raw live packet ก่อน
+  // ห้ามใช้ capture นี้ตัดสิน HP ใน runtime; ผู้ใช้เปิดเองเฉพาะช่วงตรวจสอบเท่านั้น.
+  let statCaptureUntil = 0;
+  const statCaptureEvents = [];
+  const STAT_CAPTURE_MAX_EVENTS = 40;
+  function stopStatCapture(reason) {
+    if (!statCaptureUntil) return;
+    statCaptureUntil = 0;
+    console.log('[ASSIST][STATCAP] STOP' + (reason ? ' — ' + reason : ''), statCaptureEvents.map(({ rawHex, ...event }) => event));
+  }
+  function captureStatInbound(u) {
+    if (!statCaptureUntil) return;
+    const now = nowMs();
+    if (now >= statCaptureUntil) { stopStatCapture('หมดเวลา'); return; }
+    if (u[0] !== 0x25) return;
+    const event = {
+      atMs: now,
+      bytes: u.length,
+      entityId: u.length >= 5 ? u32(u, 1).toString(16) : null,
+      statType: u.length >= 9 ? u32(u, 5) : null,
+      curAt9: u.length >= 13 ? u32(u, 9) : null,
+      maxAt13: u.length >= 17 ? u32(u, 13) : null,
+      flagAt17: u.length >= 18 ? u[17] : null,
+      isSelf: u.length >= 5 && u32(u, 1) === playerId,
+      rawHex: packetHex(u),
+    };
+    statCaptureEvents.push(event);
+    while (statCaptureEvents.length > STAT_CAPTURE_MAX_EVENTS) statCaptureEvents.shift();
+    console.log('[ASSIST][STATCAP]', { ...event, rawHex: undefined });
+  }
+  function startStatCapture(seconds = 15) {
+    const sec = Math.max(3, Math.min(60, Number(seconds) || 15));
+    statCaptureEvents.length = 0;
+    statCaptureUntil = nowMs() + sec * 1000;
+    console.log('[ASSIST][STATCAP] START — รอ packet 0x25 ' + sec + 's; ยืนเฉย ๆ แล้วรับดาเมจ/ฮีล 1 ครั้งถ้าทำได้');
+    setTimeout(() => {
+      if (statCaptureUntil && nowMs() >= statCaptureUntil) stopStatCapture('หมดเวลา');
+    }, sec * 1000 + 50);
+  }
+  function getStatCaptureDump() {
+    return JSON.stringify(statCaptureEvents, null, 2);
+  }
 
   // ---------- WEAPON packet capture (temporary investigation tool) ----------
   // Server source says equip/unequip is [op][bagId:4 LE][isEquip:1].
@@ -4067,7 +4234,7 @@
         const off = WARP_OFFSETS[wit.offsetIdx] || [0, 0, '?'];
         const tx = Math.round(wit.x + off[0]);
         const ty = Math.round(wit.y + off[1]);
-        if (sendTeleport(currentMap, tx, ty)) {
+        if (sendTeleport(currentMap, tx, ty, 'warp-to-loot')) {
           wit.warpAt = now;
           wit.pickupSentAt = 0;
           lastWarpAt = now;
@@ -4113,7 +4280,7 @@
     log('⚠️ ยกเลิกขาย:', reason);
     sellState = 'IDLE'; sellStateAt = 0;
     // พยายามวาร์ปกลับถ้ามี returnTo
-    if (sellReturnTo && sellReturnTo.map) { sendTeleport(sellReturnTo.map, sellReturnTo.x, sellReturnTo.y); }
+    if (sellReturnTo && sellReturnTo.map) { sendTeleport(sellReturnTo.map, sellReturnTo.x, sellReturnTo.y, 'sell-abort-return'); }
     sellReturnTo = null;
   }
   // สร้าง trigger check + state machine ใน loop เดียว
@@ -4139,8 +4306,9 @@
       if (shouldSell && currentMap && player.x != null) {
         sellReturnTo = { map: currentMap, x: Math.round(player.x), y: Math.round(player.y) };
         log('💰 เริ่มขายของ (' + reason + ') → วาร์ปไป', CFG.sellNpcMap, '@(', CFG.sellNpcX, CFG.sellNpcY + ')');
-        sendTeleport(CFG.sellNpcMap, CFG.sellNpcX, CFG.sellNpcY);
-        setSellState('WARP_TO_NPC');
+        if (sendTeleport(CFG.sellNpcMap, CFG.sellNpcX, CFG.sellNpcY, 'sell-to-npc')) {
+          setSellState('WARP_TO_NPC');
+        }
       }
       return;
     }
@@ -4196,10 +4364,11 @@
     if (sellState === 'WARP_BACK') {
       // รอ 2s แล้ววาร์ปกลับ
       if (now - sellStateAt > 2000 && sellReturnTo) {
-        sendTeleport(sellReturnTo.map, sellReturnTo.x, sellReturnTo.y);
-        log('💰 วาร์ปกลับ', sellReturnTo.map);
-        sellReturnTo = null;
-        setSellState('IDLE');
+        if (sendTeleport(sellReturnTo.map, sellReturnTo.x, sellReturnTo.y, 'sell-return')) {
+          log('💰 วาร์ปกลับ', sellReturnTo.map);
+          sellReturnTo = null;
+          setSellState('IDLE');
+        }
       }
       return;
     }
@@ -4245,7 +4414,7 @@
     storageRetryAt = nowMs() + STORAGE_ABORT_RETRY_MS;
     log('🏦 จะลองฝากใหม่อีกครั้งหลัง', (STORAGE_ABORT_RETRY_MS / 1000).toFixed(0) + 's');
     if (storageReturnTo && storageReturnTo.map) {
-      sendTeleport(storageReturnTo.map, storageReturnTo.x, storageReturnTo.y);
+      sendTeleport(storageReturnTo.map, storageReturnTo.x, storageReturnTo.y, 'storage-abort-return');
       setStorageState('RETURN_FARM');
       log('🏦 ยกเลิกแล้ว → วาร์ปกลับ', storageReturnTo.map);
     } else {
@@ -4262,7 +4431,7 @@
     storageWarpLastSentAt = nowMs();
     storageKafraMapReadyAt = 0;
     log('🏦 เริ่มฝากของ (' + reason + ') → วาร์ปไป', CFG.kafraMap, '@(', point.warpX, point.warpY + ')', '(ข้าง Kafra ' + point.x + ',' + point.y + ')');
-    if (!sendTeleport(CFG.kafraMap, point.warpX, point.warpY)) {
+    if (!sendTeleport(CFG.kafraMap, point.warpX, point.warpY, 'storage-to-kafra')) {
       storageRetryAt = nowMs() + STORAGE_ABORT_RETRY_MS;
       log('⚠️ เริ่มฝากไม่ได้: ส่งวาร์ปไม่สำเร็จ → รอ retry');
       return false;
@@ -4382,7 +4551,7 @@
         if (elapsed >= STORAGE_WARP_TIMEOUT_MS) { abortStorage('วาร์ปไป ' + CFG.kafraMap + ' ไม่สำเร็จใน ' + (STORAGE_WARP_TIMEOUT_MS / 1000) + 's'); return; }
         if (now - storageWarpLastSentAt >= STORAGE_WARP_RETRY_MS) {
           const point = storageKafraPoint();
-          if (sendTeleport(CFG.kafraMap, point.warpX, point.warpY)) {
+          if (sendTeleport(CFG.kafraMap, point.warpX, point.warpY, 'storage-kafra-retry')) {
             storageWarpAttempts++;
             storageWarpLastSentAt = now;
             log('🏦 ยังไม่ถึง', CFG.kafraMap, '→ ลองวาร์ปอีกครั้ง (' + storageWarpAttempts + ')');
@@ -4521,9 +4690,10 @@
     if (storageState === 'CLOSE_STORAGE') {
       // รอ 1.5s หลัง close แล้ววาร์ปกลับ และ hold Flee Player จน MAP_NAME ยืนยันว่ากลับถึง
       if (now - storageStateAt > 1500 && storageReturnTo) {
-        sendTeleport(storageReturnTo.map, storageReturnTo.x, storageReturnTo.y);
-        log('🏦 วาร์ปกลับ', storageReturnTo.map);
-        setStorageState('RETURN_FARM');
+        if (sendTeleport(storageReturnTo.map, storageReturnTo.x, storageReturnTo.y, 'storage-return')) {
+          log('🏦 วาร์ปกลับ', storageReturnTo.map);
+          setStorageState('RETURN_FARM');
+        }
       }
       return;
     }
@@ -4534,7 +4704,7 @@
         log('🏦 กลับแมพฟาร์มแล้ว → Storage จบ');
       } else if (now - storageStateAt > 5000) {
         // server ยังไม่เปลี่ยนแมป → ลองวาร์ปกลับซ้ำโดยยัง hold Flee Player อยู่
-        sendTeleport(storageReturnTo.map, storageReturnTo.x, storageReturnTo.y);
+        sendTeleport(storageReturnTo.map, storageReturnTo.x, storageReturnTo.y, 'storage-return-retry');
         storageStateAt = now;
         log('🏦 ยังไม่กลับ', storageReturnTo.map, '→ ลองวาร์ปกลับอีกครั้ง');
       }
@@ -4591,7 +4761,7 @@
     oreRefineKafraId = null;
     oreRefineNpcId = null;
     log('⛏️ เริ่มย่อย Great Nature → Green Live → Sell; ไปจุดเริ่ม', CFG.oreRefineMap, '@(', CFG.oreRefineHubX, CFG.oreRefineHubY + ')');
-    if (!sendTeleport(CFG.oreRefineMap, CFG.oreRefineHubX, CFG.oreRefineHubY)) return false;
+    if (!sendTeleport(CFG.oreRefineMap, CFG.oreRefineHubX, CFG.oreRefineHubY, 'ore-refine-start')) return false;
     setOreRefineState('WARP_HUB');
     return true;
   }
@@ -4780,6 +4950,14 @@
   const entities = new Map();    // id -> {id,kind,sub,name,x,y,hp,hpMax,alive,_lastEngagedByOtherAt,_lastDamageAt}
   const monsterAggro = new Map(); // monsterId -> timestamp (มอนจับเราเป็นเป้า)
   const stalePlayerIds = new Map(); // oldPlayerId -> expireAt (กัน phantom entity จาก ID เก่า, 5 นาที)
+  const radarPlayerIds = new Map(); // id -> expiry timestamp จาก 0x3c flag=1 (radar ยืนยันผู้เล่น)
+  const RADAR_PLAYER_TTL_MS = 30000;
+  function isRadarPlayerId(id, now = nowMs()) {
+    const expiresAt = radarPlayerIds.get(id);
+    if (!expiresAt) return false;
+    if (now >= expiresAt) { radarPlayerIds.delete(id); return false; }
+    return true;
+  }
   function isStaleId(id, now) {
     const exp = stalePlayerIds.get(id);
     if (!exp) return false;
@@ -5249,6 +5427,8 @@
 
   function isTargetable(m, now) {
     if (!m || !m.alive) return false;
+    if (m.id === FAIL || m.id === 0) return false;        // sentinel / invalid entity IDs
+    if (isRadarPlayerId(m.id, now)) return false;          // minimap ยืนยันว่าเป็นผู้เล่น
     if (m.kind !== 1) return false;                       // ตีเฉพาะ monster
     if (m.x == null || m.y == null) return false;
     if (isStaleId(m.id, now)) return false;               // ★ skip stale player IDs (phantom)
@@ -5638,7 +5818,7 @@
     const mapName = currentMap || CFG.farmMap;
     if (!mapName) { log('⚠️ วาร์ปหนีไม่ได้: ยังไม่รู้แมปปัจจุบันและไม่ได้ตั้ง farmMap'); return false; }
     if (!currentMap) log('ℹ️ วาร์ปหนี: ยังไม่รู้แมปปัจจุบัน → ใช้ farmMap', mapName);
-    return sendTeleport(mapName, -999, -999);
+    return sendTeleport(mapName, -999, -999, 'safety-flee');
   }
   // SIT/STAND OUT: [0e][state:1] (1=นั่ง, 0=ยืน) — format ยืนยันจากบอทหลัก protocol.js:381
   function sendSit() {
@@ -5752,7 +5932,7 @@ function abBuffTimeoutMs() {
       return;
     }
     abBuffNextAt = timerNow + 5000; // ถ้าวาร์ปไม่เปลี่ยนแมป ให้ลองใหม่ภายหลัง ไม่ spam packet
-    if (sendTeleport(CFG.abBuffMap, CFG.abBuffX, CFG.abBuffY)) {
+    if (sendTeleport(CFG.abBuffMap, CFG.abBuffX, CFG.abBuffY, 'ab-buff-to-source')) {
       log('⛪ บัพไม่ครบ (' + missingAbBuffNames(timerNow).join(', ') + ') → วาร์ปไป', CFG.abBuffMap, '@(', CFG.abBuffX, CFG.abBuffY + ')');
     } else {
       abBuffNextAt = timerNow + 1000;
@@ -5796,7 +5976,7 @@ function abBuffTimeoutMs() {
       return;
     }
     abBuffNextAt = timerNow + 5000;
-    if (sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY)) {
+    if (sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY, 'ab-buff-return')) {
       log(abBuffDisableAfterReturn
         ? '⛪ AB Buff timeout → วาร์ปกลับแมปฟาร์ม'
         : '⛪ ได้ Increase Agility + Blessing ครบ → วาร์ปกลับแมปฟาร์ม');
@@ -6053,7 +6233,7 @@ function abBuffTimeoutMs() {
         const waitMs = nowMs() - waitStartedAt;
         if (waitMs < 5000) return 'WAIT_MAP';
         log('⚠️ วาร์ปไปหา', m.name || targetId.toString(16), 'ไม่ได้: ยังไม่รู้ชื่อแมปหลังรอ 5s');
-      } else if (sendTeleport(currentMap, m.x, m.y)) {
+      } else if (sendTeleport(currentMap, m.x, m.y, 'combat-unreachable')) {
         warpToMonsterCount.set(targetId, used + 1);
         log('🌀 unreachable → วาร์ปไปหา', m.name || targetId.toString(16), '@(', m.x, m.y + ')', '(warp', used + 1 + ')');
         return 'TARGET_WARP';
@@ -6387,6 +6567,7 @@ function abBuffTimeoutMs() {
   let combatCooldownUntil = 0;   // ★ หยุด combat ชั่วคราวจนกว่าจะถึงเวลานี้ (post-combat delay)
   const combatLoop = setInterval(() => {
     const now = nowMs();
+    tickTeleportCoordinator(now);
     // Auto-Respawn ต้องมาก่อนทุก flow รวมถึง Loot Queue: collector อาจตายระหว่างไปรับ drop
     // หาก return เพราะ activeJob ก่อนถึงจุดนี้ ตัวละครจะค้างตายและไม่มี packet 0x29 ออกไป
     if (isDead) {
@@ -6423,6 +6604,14 @@ function abBuffTimeoutMs() {
     //   เหมือน auto-rest ปกติ แต่ trigger จาก flag postRespawnRest ไม่ใช่ HP%
     if (!isAbBuffActive() && postRespawnRest && CFG.restEnabled && hp.cur != null) {
       const pct = hpPct();
+      if (shouldDeferRestForNormalLoot(now)) {
+        if (isResting && sendStand()) {
+          isResting = false;
+          restUntil = 0;
+          log('📦 มีของปกติค้าง → ลุกเก็บก่อนพักหลังเกิด');
+        }
+        return;
+      }
       if (!isResting && pct != null && pct < CFG.restUntilPercent) {
         if (sendSit()) {
           isResting = true;
@@ -6459,7 +6648,7 @@ function abBuffTimeoutMs() {
       const now2 = nowMs();
       if (now2 - (lastFarmWarpBackAt || 0) > 5000) {
         log('🌀 ยังอยู่แมปผิด (' + currentMap + ') → วาร์ปกลับอีกครั้ง');
-        sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY);
+        sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY, 'farm-map-guard-retry');
         lastFarmWarpBackAt = now2;
       }
       return;
@@ -6467,10 +6656,17 @@ function abBuffTimeoutMs() {
     const pct = hpPct();
     const mobCount = getMobAttackerCount();
 
-    // === -1. AUTO-REST (priority สูงสุด — ก่อน flee) ===
-    //   ถ้า HP ต่ำ + ไม่โดนรุม → นั่งพัก; ถ้ากำลังนั่งอยู่ → จัดการลุก/นั่งต่อ
+    // === -1. AUTO-REST (ก่อน flee แต่รองจาก normal auto-loot) ===
+    //   ถ้า HP ต่ำ + ไม่โดนรุม → นั่งพัก; แต่หากมี drop ปกติค้าง ให้ลุกเก็บก่อน
     if (!isAbBuffActive() && CFG.restEnabled && pct != null && hp.cur != null) {
-      if (!isResting && pct < CFG.restHpPercent && mobCount === 0) {
+      const deferRestForLoot = shouldDeferRestForNormalLoot(now);
+      if (deferRestForLoot && isResting) {
+        if (sendStand()) {
+          isResting = false;
+          restUntil = 0;
+          log('📦 มีของปกติค้าง → ลุกเก็บก่อนพัก');
+        }
+      } else if (!deferRestForLoot && !isResting && pct < CFG.restHpPercent && mobCount === 0) {
         // เริ่มนั่งพัก
         if (sendSit()) {
           isResting = true;
@@ -8341,7 +8537,7 @@ function abBuffTimeoutMs() {
     setSellItems(...ids) { CFG.sellItemIds = ids; log('💰 ขาย item:', ids.map(nameOf).join(', ')); },
     addSellItem(id) { if (!CFG.sellItemIds.includes(id)) CFG.sellItemIds.push(id); log('💰 เพิ่มขาย:', nameOf(id)); },
     removeSellItem(id) { CFG.sellItemIds = CFG.sellItemIds.filter(x => x !== id); log('💰 เลิกขาย:', nameOf(id)); },
-    sellNow() { if (sellState === 'IDLE' && currentMap && player.x != null) { sellReturnTo = { map: currentMap, x: Math.round(player.x), y: Math.round(player.y) }; sendTeleport(CFG.sellNpcMap, CFG.sellNpcX, CFG.sellNpcY); setSellState('WARP_TO_NPC'); log('💰 ขายทันที! → วาร์ป', CFG.sellNpcMap, '@(', CFG.sellNpcX, CFG.sellNpcY + ')'); } else { log('⚠️ ไม่สามารถขายได้ตอนนี้ (state:', sellState + ')'); } },
+    sellNow() { if (sellState === 'IDLE' && currentMap && player.x != null) { sellReturnTo = { map: currentMap, x: Math.round(player.x), y: Math.round(player.y) }; if (sendTeleport(CFG.sellNpcMap, CFG.sellNpcX, CFG.sellNpcY, 'sell-manual')) { setSellState('WARP_TO_NPC'); log('💰 ขายทันที! → วาร์ป', CFG.sellNpcMap, '@(', CFG.sellNpcX, CFG.sellNpcY + ')'); } } else { log('⚠️ ไม่สามารถขายได้ตอนนี้ (state:', sellState + ')'); } },
     getInventory() { return [...inventory.entries()].map(([id, c]) => ({ id, name: itemDisplayName(id), count: c, action: getItemAction(Number(id)) })).sort((a, b) => b.count - a.count); },
 
     // ---------- Auto-Storage (ฝากเข้า Kafra) ----------
@@ -8433,11 +8629,12 @@ function abBuffTimeoutMs() {
     warpToFarm() {
       if (!CFG.farmMap) { log('⚠️ ยังไม่ได้ตั้งแมปฟาร์ม (ASSIST.setFarmMap หรือกด "ใช้พิกัดตัวละคร")'); return; }
       if (!activeWS || activeWS.readyState !== 1) { log('⚠️ ยังไม่ได้เชื่อมต่อเซิร์ฟเวอร์'); return; }
-      sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY);
+      sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY, 'farm-manual');
       log('🌀 วาร์ปไปแมปฟาร์ม:', CFG.farmMap, '@(', CFG.farmMapX, CFG.farmMapY + ')');
     },
     toggleWarpBack(on) { CFG.warpBackToFarm = !!on; log('🗺️ วาร์ปกลับแมปฟาร์มอัตโนมัติ =', CFG.warpBackToFarm); },
     lootQueueStatus() { return lootQueue.status(); },
+    teleportStatus() { return teleportCoordinator.status(); },
     lootQueueNext() { return lootQueue.skipCurrent(); },
     setLootQueueConfig(values = {}) {
       const role = ['off', 'farm', 'collector'].includes(values.role) ? values.role : CFG.lootQueueRole;
@@ -8719,6 +8916,10 @@ function abBuffTimeoutMs() {
       }, sec * 1000 + 50);
     },
     weaponCaptureOff() { stopWeaponCapture('ปิดโดยผู้ใช้'); },
+    statCaptureOn(seconds = 15) { startStatCapture(seconds); },
+    statCaptureOff() { stopStatCapture('ปิดโดยผู้ใช้'); },
+    statCaptureStatus() { return { active: statCaptureUntil > nowMs(), remainingMs: Math.max(0, statCaptureUntil - nowMs()), events: statCaptureEvents.map(({ rawHex, ...event }) => event) }; },
+    statCaptureDump() { return getStatCaptureDump(); },
     weaponCaptureStatus() {
       return {
         active: !!weaponCaptureUntil,
