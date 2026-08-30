@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ro-loot-queue",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-29",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "LOOT_QUEUE",
+        "class_name": "LootQueue"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["LootQueue"]
+    }
+  ]
+}

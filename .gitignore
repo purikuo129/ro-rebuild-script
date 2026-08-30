@@ -1,0 +1,23 @@
+# Local/editor files
+.DS_Store
+.scratch/
+
+# Dependency/build state
+node_modules/
+.wrangler/
+.dev.vars
+.dev.vars.*
+.env
+.env.*
+
+# Reference server source: not required by the distributed userscript
+RagnarokRebuildTcp/
+
+# Local safety copies; Git history/tags are the release backups
+RO Rebuild Web Assist-BackUp.js
+RO Rebuild Web Assist-BackUp-older.js
+RO Rebuild Web Assist-Before-Cloudflare.js
+
+# The userscript requests only items/small/; keep source-only large icons local
+items/large/
+items/meta.json.bak
