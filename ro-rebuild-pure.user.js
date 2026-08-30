@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.0.0
+// @version      1.0.1
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -123,7 +123,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.0.0';
+  const VERSION = '1.0.1';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // keys ที่บันทึก/โหลด (boolean/number/array/string — ไม่เก็บ function หรือ object ซ้อน)
@@ -7798,8 +7798,10 @@ function abBuffTimeoutMs() {
     gatWanderReset();
   }
   function saveProfileAs(name) {
-    name = normalizeProfileName(name);
-    if (!name) { log('⚠️ Profile: ชื่อว่าง, ยาวเกิน 80 ตัว หรือเป็นชื่อสงวน'); return false; }
+    // ไม่กรอกชื่อ = บันทึกทับ profile ที่กำลังใช้อยู่; กรอกชื่อจึงสร้าง/ทับชื่อนั้น
+    const requestedName = String(name == null ? '' : name).trim();
+    name = requestedName ? normalizeProfileName(requestedName) : activeProfileName();
+    if (!name) { log('⚠️ Profile: ชื่อยาวเกิน 80 ตัว หรือเป็นชื่อสงวน'); return false; }
     const profiles = loadProfilesStore();
     const existed = Object.prototype.hasOwnProperty.call(profiles, name);
     profiles[name] = profileSnapshot();
@@ -10133,9 +10135,9 @@ function abBuffTimeoutMs() {
             <div style="font-size:10px;color:#9aa0a6;margin-top:4px;">★ เปิด 'บันทึก' แล้วเดินเก็บข้อมูลในแมปที่ต้องการ ปิดเมื่อเสร็จ<br>★ wander จะใช้ waypoint graph แทนสุ่ม (ถ้ามีข้อมูลแมปนั้น)</div>
             <h4>👤 Profile การตั้งค่า</h4>
             <div class="field"><label>เลือก profile <small>● = ชุดที่กำลังใช้</small></label><select id="__assist_profile_sel"></select></div>
-            <div class="field"><label>ชื่อสำหรับ “บันทึกเป็น” <small>ใหม่ หรือทับชื่อเดิม</small></label><input type="text" id="__assist_profile_name" maxlength="80" placeholder="เช่น Assassin – Sleeper Farm"></div>
+            <div class="field"><label>ชื่อ Profile ใหม่ <small>เว้นว่าง = บันทึกทับชุดที่กำลังใช้</small></label><input type="text" id="__assist_profile_name" maxlength="80" placeholder="เช่น Assassin – Sleeper Farm"></div>
             <div class="btns">
-              <button id="__assist_profile_save">💾 บันทึกเป็น</button>
+              <button id="__assist_profile_save">💾 บันทึก Profile</button>
               <button id="__assist_profile_use" class="primary">🔄 ใช้ชุดที่เลือก</button>
               <button id="__assist_profile_del" class="danger">🗑 ลบ</button>
             </div>
@@ -10853,10 +10855,10 @@ function abBuffTimeoutMs() {
     refreshProfileSelect(true);
     window.addEventListener('assist:profiles-changed', () => refreshProfileSelect(true));
     root.querySelector('#__assist_profile_save').addEventListener('click', () => {
-      const name = ((profileName && profileName.value) || (profileSel && profileSel.value) || '').trim();
+      const name = ((profileName && profileName.value) || '').trim();
       if (ASSIST.saveProfileAs(name)) {
         if (profileName) profileName.value = '';
-        refreshProfileSelect(false);
+        refreshProfileSelect(true);
       }
     });
     root.querySelector('#__assist_profile_use').addEventListener('click', () => {
