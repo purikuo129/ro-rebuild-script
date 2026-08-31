@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.1.4
+// @version      1.1.9
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -124,7 +124,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.1.4';
+  const VERSION = '1.1.9';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -135,7 +135,7 @@
     'healEnabled', 'healAtPercent', 'healItems', 'healMode', 'healDelayMs', 'healAtMax',
     'buffEnabled', 'buffItems', 'buffRebuffDelayMs', 'autoClearConsoleMin', 'monitorServerEnabled', 'monitorServerUrl', 'monitorSendIntervalMs',
     'skillEnabled', 'skills', 'disabledSkillIds', 'skillCommandGapMs',
-    'lootEnabled', 'lootDelayAfterDropMs', 'lootPostKillSettleMs', 'lootUseKillPos', 'pickRadiusKill', 'filter', 'sendThrottleMs', 'lootQueueRole', 'lootQueueUrl', 'lootQueueTransport', 'lootQueueLocalUrl', 'lootQueueCloudflareUrl', 'lootQueueGroup', 'lootQueueHomeMap', 'lootQueueHomeX', 'lootQueueHomeY', 'lootQueueItemIds', 'lootQueueSendAll', 'lootQueueClaimDelayMs', 'lootQueueNearbySettleMs', 'lootQueueActionTimeoutMs', 'lootQueueWarpCooldownMs', 'lootQueuePickupRetryCount',
+    'lootEnabled', 'lootDelayAfterDropMs', 'lootPostKillSettleMs', 'lootUseKillPos', 'pickRadiusKill', 'filter', 'sendThrottleMs', 'lootQueueRole', 'lootQueueUrl', 'lootQueueTransport', 'lootQueueLocalUrl', 'lootQueueCloudflareUrl', 'lootQueueGroup', 'lootQueueHomeMap', 'lootQueueHomeX', 'lootQueueHomeY', 'lootQueueItemIds', 'lootQueueSendAll', 'lootQueueClaimDelayMs', 'lootQueueActionTimeoutMs', 'lootQueueWarpCooldownMs', 'lootQueuePickupRetryCount',
     'warpLootEnabled',
     'combatEnabled', 'targetWhitelist', 'targetBlacklist', 'attackRange', 'rangedAttackRange', 'attackProbeMs', 'hiddenWaitMonsters', 'hiddenWaitSec', 'hiddenSightEnabled',
     'maxAcquireDistance', 'searchRadii', 'maxChaseDistance', 'antiKS', 'antiKSCooldownMs', 'avoidOtherPlayers', 'playerProximityRadius', 'postWarpTargetSettleMs', 'combatGatProgressTimeoutMs', 'targetLowestHpFirst',
@@ -518,9 +518,8 @@
     lootQueueItemIds: [],        // item ที่ให้ไอดีฟาร์มส่งต่อไป collector
     lootQueueSendAll: false,     // farm only: ส่งทุก drop โดยไม่ต้องอยู่ในรายการพิเศษ
     lootQueueClaimDelayMs: 5000, // รอก่อนออกจากจุดรอ/เมืองเพื่อรวม drop (0=ทันที)
-    lootQueueNearbySettleMs: 1000, // ทิ้งงานแล้วรอก่อนหา job ถัดไป (0=ทันที)
     lootQueueActionTimeoutMs: 1000, // รอผลของ pickup แต่ละครั้งก่อน retry/ทิ้งงาน (ms)
-    lootQueueWarpCooldownMs: 0, // ดีเลย์ก่อนวาร์ป job ถัดไป (0=ทันที); WARP_CONFIRM ยังกันคำสั่งซ้ำของ job เดิม
+    lootQueueWarpCooldownMs: 0, // ดีเลย์ก่อนวาร์ป job ถัดไปหรือกลับจุดรอ (0=ทันที); WARP_CONFIRM ยังกันคำสั่งซ้ำของ job เดิม
     lootQueuePickupRetryCount: 2, // server ตอบ FAIL/เงียบหลังวาร์ป → retry เพิ่มหลังคำสั่งแรกกี่ครั้ง
 
     // ---------- WARP-TO-LOOT (ฟีเจอร์รุนแรง — default OFF) ----------
@@ -1761,11 +1760,9 @@
   //  caller เดิมมี retry/state machine ของตัวเองอยู่แล้ว จึงคืน false ระหว่าง hold
   //  เพื่อไม่ให้ caller เริ่ม timeout นับก่อน server ได้รับคำสั่งจริง.
   // ============================================================
-  const TELEPORT_CROSS_MAP_GAP_MS = 3000;
   const TELEPORT_CONFIRM_TIMEOUT_MS = 6000;
   teleportCoordinator = (() => {
     let active = null;
-    let lastCrossMapSentAt = 0;
     let lastHoldKey = '';
     let lastHoldLogAt = 0;
     const isSameMapRandom = (request) => request.map === currentMap && request.x === -999 && request.y === -999;
@@ -1798,17 +1795,11 @@
         return false;
       }
       const crossMap = !currentMap || next.map !== currentMap;
-      if (crossMap && now - lastCrossMapSentAt < TELEPORT_CROSS_MAP_GAP_MS) {
-        logHold(next, 'เว้นระยะ cross-map ' + TELEPORT_CROSS_MAP_GAP_MS + 'ms', now);
-        return false;
-      }
-
       // clear state เฉพาะเมื่อส่ง packet จริง ไม่ใช่แค่ caller ขอวาร์ประหว่าง hold.
       clearWarpState();
       if (crossMap) suspendFpsCapForMapLoad();
       sendTeleportPacket(next.map, next.x, next.y);
       startTeleportGuard();
-      if (crossMap) lastCrossMapSentAt = now;
       // วาร์ปสุ่มในแมปเดิมไม่ต้องรอ MAP_NAME และห้าม block safety flee/warp-find รอบถัดไป.
       if (!isSameMapRandom(next)) {
         active = { ...next, crossMap, sentAt: now, positionAt: lastPlayerPositionPacketAt, fromMap: currentMap };
@@ -1841,7 +1832,6 @@
         const now = nowMs();
         return {
           active: active && { map: active.map, x: active.x, y: active.y, reason: active.reason, crossMap: active.crossMap, remainingMs: Math.max(0, TELEPORT_CONFIRM_TIMEOUT_MS - (now - active.sentAt)) },
-          crossMapGapRemainingMs: Math.max(0, TELEPORT_CROSS_MAP_GAP_MS - (now - lastCrossMapSentAt)),
         };
       },
     };
@@ -1981,7 +1971,6 @@
     let homeReturn = null; // { requestedAt, attempts, retryAt, fromMap } — รอ MAP_NAME/พิกัดยืนยันการกลับจุดรอ
     let claimPendingId = null, claimPendingAt = 0, lastClaimRttMs = null;
     let idleReturnAt = 0;
-    let nextClaimAt = 0;
     const pendingOffers = new Map();
     const availableJobs = new Map(); // งาน open ที่มาถึงระหว่าง collector กำลังเก็บชิ้นก่อนหน้า
     const clientId = 'assist-' + Math.random().toString(36).slice(2, 10);
@@ -2001,10 +1990,6 @@
     const claimDelayMs = () => {
       const delay = Number(CFG.lootQueueClaimDelayMs);
       return Number.isFinite(delay) ? Math.max(0, Math.min(30000, Math.round(delay))) : 5000;
-    };
-    const failureNextJobDelayMs = () => {
-      const delay = Number(CFG.lootQueueNearbySettleMs);
-      return Number.isFinite(delay) ? Math.max(0, Math.min(10000, Math.round(delay))) : 1000;
     };
     const pickupResponseWaitMs = () => {
       const delay = Number(CFG.lootQueueActionTimeoutMs);
@@ -2027,7 +2012,7 @@
     };
     const jobsFrom = (message) => message.job ? [message.job] : (Array.isArray(message.jobs) ? message.jobs : []);
     const claim = (job) => {
-      if (!job || claimPendingId || nowMs() < nextClaimAt || !collectorGameReady() || !send({ type: 'claim', id: job.id })) return false;
+      if (!job || claimPendingId || !collectorGameReady() || !send({ type: 'claim', id: job.id })) return false;
       claimPendingId = job.id;
       claimPendingAt = nowMs();
       idleReturnAt = 0;
@@ -2159,9 +2144,8 @@
       log('🚫 Loot Queue: ทิ้ง', stale.job.itemName, '—', reason);
       activeJob = null;
       claimPendingId = null;
-      // FAIL ครบแล้วจึงทิ้ง job นี้; เว้นช่วงเดียวก่อน claim งานใหม่หรือกลับจุดรอ.
-      nextClaimAt = nowMs() + failureNextJobDelayMs();
-      idleReturnAt = nextClaimAt;
+      // งานนี้จบแล้ว: claim งานถัดไปได้ทันที; ถ้าไม่มีจึงใช้ delay วาร์ปเดิมก่อนกลับจุดรอ.
+      idleReturnAt = nowMs() + warpCooldownMs();
       return true;
     };
     // กระเป๋าเต็มจริง: ห้าม discard เพราะ drop อาจยังอยู่บนพื้น ให้ปล่อยกลับเป็น open job
@@ -2172,7 +2156,6 @@
       activeJob = null;
       claimPendingId = null;
       idleReturnAt = 0;
-      nextClaimAt = 0;
       if (stale.settleUntil) {
         log('🏦 Loot Queue: งานก่อนหน้าจบแล้ว → ไปฝากของ');
         return true;
@@ -2186,7 +2169,7 @@
       handlesSpecial: (itemId) => role() !== 'off' && (role() === 'farm' ? shouldOfferLootQueueItem(itemId) : (CFG.lootQueueSendAll || special(itemId))),
       isCollectorBusy: () => role() === 'collector' && !!activeJob,
       // ระหว่าง claim/รอเลือกงาน/วาร์ปกลับ ห้าม warp-back-to-farm แทรก flow ของ collector
-      isCollectorActive: () => role() === 'collector' && (!!activeJob || !!homeReturn || !!claimPendingId || nextClaimAt > nowMs() || idleReturnAt > nowMs()),
+      isCollectorActive: () => role() === 'collector' && (!!activeJob || !!homeReturn || !!claimPendingId || idleReturnAt > nowMs()),
       // Profile ต้องไม่เปลี่ยน endpoint/role ระหว่างยังถือ claim หรือยังมี offer รอส่ง
       isProfileBusy: () => !!activeJob || !!homeReturn || !!claimPendingId || pendingOffers.size > 0,
       skipCurrent() {
@@ -2282,7 +2265,7 @@
       },
       pause() {
         if (activeJob && !activeJob.settleUntil) send({ type: 'nack', id: activeJob.job.id, claimToken: activeJob.claimToken });
-        activeJob = null; homeReturn = null; claimPendingId = null; claimPendingAt = 0; idleReturnAt = 0; nextClaimAt = 0;
+        activeJob = null; homeReturn = null; claimPendingId = null; claimPendingAt = 0; idleReturnAt = 0;
         pendingOffers.clear(); availableJobs.clear();
         lootQueueTransport.close();
       },
@@ -2305,8 +2288,6 @@
             homeReturn = null;
             return;
           }
-          if (nowMs() < nextClaimAt) return;
-          nextClaimAt = 0;
           if (homeReturn) {
             const nextWhileReturning = [...availableJobs.values()].filter(job => job.expiresAt > nowMs()).sort((a, b) => a.createdAt - b.createdAt)[0];
             if (nextWhileReturning) {
@@ -2361,6 +2342,13 @@
           // Cloudflare อาจตอบ claimed หลัง tick ถัดไป: ห้าม return-home จนกว่าจะตอบหรือ timeout.
           if (claimPendingId) return;
           if (holdForAbBuff) log('📮 Loot Queue: งานปัจจุบันจบแล้ว → ไม่ต่อคิว เพราะ AB Buff รออยู่');
+          // ไม่มีงานต่อแล้วจึงใช้ delay วาร์ปของ Loot Queue เดิมก่อนกลับจุดรอ.
+          // หาก job ใหม่เข้ามาระหว่างรอ nextOpenJob() ด้านบนจะ claim ก่อนเสมอ.
+          if (!activeJob.returnHomeNotBefore) activeJob.returnHomeNotBefore = now + warpCooldownMs();
+          if (now < activeJob.returnHomeNotBefore) {
+            stage('return-home-delay', 'ไม่มี job ถัดไป → รอ ' + Math.max(0, activeJob.returnHomeNotBefore - now) + 'ms ก่อนกลับจุดรอ');
+            return;
+          }
           returnHome();
           return;
         }
@@ -2506,7 +2494,6 @@
           activeJob: activeJob && activeJob.job, activeStage: activeJob?.stage || (homeReturn ? 'return-home ' + homeReturn.attempts + '/' + MAX_WARP_ATTEMPTS : ''),
           claimDelayRemainingMs: activeJob ? Math.max(0, (activeJob.claimDelayUntil || 0) - nowMs()) : 0,
           nearbySettleRemainingMs: activeJob ? Math.max(0, (activeJob.settleUntil || 0) - nowMs()) : 0,
-          nextClaimRemainingMs: Math.max(0, nextClaimAt - nowMs()),
           canSkip, availableJobs: availableJobs.size, returningHome: !!homeReturn };
       },
       reconnect() { lootQueueTransport.reconnect(); connect(); },
@@ -3992,8 +3979,8 @@
   //  observation/capture แยกจาก protocol implementation เพื่อเพิ่ม handler ได้โดยไม่แตะ WebSocket hook
   // ============================================================
   const gamePacketRuntime = (() => {
-    const inboundObservers = [captureWeaponInbound, captureInventoryInbound, captureStorageInbound, captureOreRefineInbound, captureStatInbound];
-    const outboundObservers = [captureWeaponPacket, captureOreRefineOutbound];
+    const inboundObservers = [captureWeaponInbound, captureInventoryInbound, captureStorageInbound, captureOreRefineInbound, captureStatInbound, captureStatusCleanseInbound];
+    const outboundObservers = [captureWeaponPacket, captureOreRefineOutbound, captureStatusCleanseOutbound];
     const observe = (observers, packet) => observers.forEach(observer => observer(packet));
     return {
       receiveInbound(packet) {
@@ -4011,6 +3998,80 @@
   })();
   function handleIn(u) { return gamePacketRuntime.receiveInbound(u); }
   function handleOut(u) { return gamePacketRuntime.receiveOutbound(u); }
+
+  // ---------- STATUS CLEANSE capture (observation only; no packet is sent) ----------
+  // Rebuild's right-click-to-remove protocol is unknown.  Capture the self
+  // status lifecycle first, then only the short outbound window in which the
+  // user manually clicks the icon.  Chat payloads are always redacted.
+  const STATUS_CLEANSE_CAPTURE_MAX_EVENTS = 40;
+  const STATUS_CLEANSE_CAPTURE_MAX_BYTES = 64;
+  const STATUS_CLEANSE_CAPTURE_OUTBOUND_WINDOW_MS = 8000;
+  let statusCleanseCaptureUntil = 0, statusCleanseCaptureStartedAt = 0;
+  let statusCleanseCaptureOutboundUntil = 0, statusCleanseCaptureTimer = null;
+  const statusCleanseCaptureEvents = [];
+  function statusCleanseCapturePush(event) {
+    statusCleanseCaptureEvents.push(event);
+    while (statusCleanseCaptureEvents.length > STATUS_CLEANSE_CAPTURE_MAX_EVENTS) statusCleanseCaptureEvents.shift();
+  }
+  function stopStatusCleanseCapture(reason) {
+    if (!statusCleanseCaptureUntil) return;
+    statusCleanseCaptureUntil = 0;
+    statusCleanseCaptureOutboundUntil = 0;
+    if (statusCleanseCaptureTimer) { clearTimeout(statusCleanseCaptureTimer); statusCleanseCaptureTimer = null; }
+    console.log('[ASSIST][CLEANSECAP] STOP' + (reason ? ' — ' + reason : ''), statusCleanseCaptureEvents.map(({ rawHex, ...event }) => event));
+  }
+  function statusCleanseCaptureRaw(u) {
+    // 0x2c is chat; never retain or expose its user-provided payload.
+    if (u[0] === 0x2c) return '<REDACTED chat payload>';
+    const bytes = u.slice(0, Math.min(u.length, STATUS_CLEANSE_CAPTURE_MAX_BYTES));
+    return packetHex(bytes) + (u.length > bytes.length ? '…' : '');
+  }
+  function captureStatusCleanseInbound(u) {
+    if (!statusCleanseCaptureUntil) return;
+    const now = nowMs();
+    if (now >= statusCleanseCaptureUntil) { stopStatusCleanseCapture('หมดเวลา'); return; }
+    const op = u[0];
+    if (op !== 0x3d && op !== 0x3e) return;
+    if (playerId == null || u.length < 7 || u32(u, 1) !== playerId) return;
+    const statusId = u[5];
+    const durationSec = op === 0x3d && u.length >= 10 ? f32(u, 6) : null;
+    statusCleanseCaptureOutboundUntil = now + STATUS_CLEANSE_CAPTURE_OUTBOUND_WINDOW_MS;
+    const event = {
+      direction: 'IN', afterMs: now - statusCleanseCaptureStartedAt,
+      op: '0x' + op.toString(16).padStart(2, '0'), type: op === 0x3d ? 'status-apply' : 'status-remove',
+      statusId: '0x' + statusId.toString(16).padStart(2, '0'),
+      durationSec: Number.isFinite(durationSec) ? Number(durationSec.toFixed(3)) : null,
+      len: u.length, rawHex: statusCleanseCaptureRaw(u),
+    };
+    statusCleanseCapturePush(event);
+    console.log('[ASSIST][CLEANSECAP][IN] status=' + event.statusId + ' → คลิกขวาไอคอนภายใน 8s', { ...event, rawHex: undefined });
+  }
+  function captureStatusCleanseOutbound(u) {
+    if (!statusCleanseCaptureUntil) return;
+    const now = nowMs();
+    if (now >= statusCleanseCaptureUntil) { stopStatusCleanseCapture('หมดเวลา'); return; }
+    if (now > statusCleanseCaptureOutboundUntil) return;
+    // Normal locomotion/combat/pickup traffic is unrelated to a Status icon.
+    if ([0x07, 0x0b, 0x52].includes(u[0])) return;
+    const event = {
+      direction: 'OUT', afterMs: now - statusCleanseCaptureStartedAt,
+      op: '0x' + u[0].toString(16).padStart(2, '0'), len: u.length,
+      rawHex: statusCleanseCaptureRaw(u),
+    };
+    statusCleanseCapturePush(event);
+    console.log('[ASSIST][CLEANSECAP][OUT]', { ...event, rawHex: undefined });
+  }
+  function startStatusCleanseCapture(seconds = 300) {
+    const sec = Math.max(30, Math.min(600, Number(seconds) || 300));
+    statusCleanseCaptureEvents.length = 0;
+    statusCleanseCaptureStartedAt = nowMs();
+    statusCleanseCaptureUntil = statusCleanseCaptureStartedAt + sec * 1000;
+    statusCleanseCaptureOutboundUntil = 0;
+    if (statusCleanseCaptureTimer) clearTimeout(statusCleanseCaptureTimer);
+    statusCleanseCaptureTimer = setTimeout(() => stopStatusCleanseCapture('หมดเวลา'), sec * 1000 + 100);
+    console.log('[ASSIST][CLEANSECAP] START — รอโดน Status; เมื่อ log บอก status แล้ว ให้คลิกขวาไอคอนภายใน 8s. ใช้ ASSIST.statusCleanseCaptureDump() หลังจบ (' + sec + 's)');
+  }
+  function getStatusCleanseCaptureDump() { return JSON.stringify(statusCleanseCaptureEvents, null, 2); }
 
   // ---------- STAT (0x25) capture — observation only, before changing the HP router ----------
   // เซิร์ฟเวอร์อาจเปลี่ยน layout/ความหมายของ statType ได้ จึงเก็บ raw live packet ก่อน
@@ -6100,6 +6161,10 @@
   function drainManualSkillQueue() {
     manualSkillQueueTimer = null;
     if (!manualSkillQueue.length) return;
+    // Collector owns the command lane until its current job has finished.
+    // Keep an explicit “use skill now” request queued instead of letting it
+    // interrupt pickup/retry and make the loot result time out.
+    if (lootQueue.isCollectorBusy()) return;
     if (!activeWS || activeWS.readyState !== 1) {
       log('⚠️ ยกเลิกคิว skill: WebSocket หลุด');
       manualSkillQueue = [];
@@ -6979,6 +7044,9 @@ function abBuffTimeoutMs() {
       }
       return;
     }
+    // A manual request deferred by Collector has no timer of its own.  Reuse
+    // this existing loop to resume it on the first idle tick.
+    if (!lootQueue.isCollectorBusy() && manualSkillQueue.length && !manualSkillQueueTimer) drainManualSkillQueue();
     // collector มี movement/pickup flow ของ Loot Queue เป็นเจ้าของอยู่
     if (lootQueue.isCollectorBusy()) return;
     // Player Flee เป็น safety flow อิสระจาก Combat: OFF ก็ยังต้องหนีผู้เล่นที่ยืนนิ่งอยู่ได้
@@ -9128,7 +9196,6 @@ function abBuffTimeoutMs() {
       if ('homeX' in values && Number.isFinite(values.homeX)) CFG.lootQueueHomeX = Math.round(values.homeX);
       if ('homeY' in values && Number.isFinite(values.homeY)) CFG.lootQueueHomeY = Math.round(values.homeY);
       if ('claimDelayMs' in values && Number.isFinite(values.claimDelayMs)) CFG.lootQueueClaimDelayMs = Math.max(0, Math.min(30000, Math.round(values.claimDelayMs)));
-      if ('nearbySettleMs' in values && Number.isFinite(values.nearbySettleMs)) CFG.lootQueueNearbySettleMs = Math.max(0, Math.min(10000, Math.round(values.nearbySettleMs)));
       if ('warpCooldownMs' in values && Number.isFinite(values.warpCooldownMs)) CFG.lootQueueWarpCooldownMs = Math.max(0, Math.min(10000, Math.round(values.warpCooldownMs)));
       if ('actionTimeoutMs' in values && Number.isFinite(values.actionTimeoutMs)) CFG.lootQueueActionTimeoutMs = Math.max(100, Math.min(30000, Math.round(values.actionTimeoutMs)));
       if ('pickupRetryCount' in values && Number.isFinite(values.pickupRetryCount)) CFG.lootQueuePickupRetryCount = Math.max(0, Math.min(5, Math.round(values.pickupRetryCount)));
@@ -9393,6 +9460,18 @@ function abBuffTimeoutMs() {
     statCaptureOff() { stopStatCapture('ปิดโดยผู้ใช้'); },
     statCaptureStatus() { return { active: statCaptureUntil > nowMs(), remainingMs: Math.max(0, statCaptureUntil - nowMs()), events: statCaptureEvents.map(({ rawHex, ...event }) => event) }; },
     statCaptureDump() { return getStatCaptureDump(); },
+    statusCleanseCaptureOn(seconds = 300) { startStatusCleanseCapture(seconds); },
+    statusCleanseCaptureOff() { stopStatusCleanseCapture('ปิดโดยผู้ใช้'); },
+    statusCleanseCaptureStatus() {
+      const now = nowMs();
+      return {
+        active: statusCleanseCaptureUntil > now,
+        remainingMs: Math.max(0, statusCleanseCaptureUntil - now),
+        rightClickWindowRemainingMs: Math.max(0, statusCleanseCaptureOutboundUntil - now),
+        events: statusCleanseCaptureEvents.map(({ rawHex, ...event }) => event),
+      };
+    },
+    statusCleanseCaptureDump() { return getStatusCleanseCaptureDump(); },
     weaponCaptureStatus() {
       return {
         active: !!weaponCaptureUntil,
@@ -10653,8 +10732,7 @@ function abBuffTimeoutMs() {
             <div class="field"><label>กลุ่มคิว (ทั้ง 2 ไอดีต้องตรงกัน)</label><input type="text" id="__assist_lootqueuegroup" placeholder="default"></div>
             <div class="field"><label>จุดรอ collector: map / X / Y</label><div style="display:flex;gap:6px"><input type="text" id="__assist_lootqueuehomemap" placeholder="prontera"><input type="number" id="__assist_lootqueuehomex" placeholder="150"><input type="number" id="__assist_lootqueuehomey" placeholder="150"></div></div>
             <div class="field"><label>รอหลังรับงานก่อนวาร์ป (ms) — ใช้เฉพาะเมื่ออยู่จุดรอ/เมือง (0=ทันที)</label><input type="number" id="__assist_lootqueueclaimdelay" min="0" max="30000" step="500" placeholder="5000"></div>
-            <div class="field"><label>รอหลังทิ้งงานก่อนหา job ถัดไป (ms) — FAIL/เงียบครบ retry; เก็บสำเร็จจะต่อคิวทันที</label><input type="number" id="__assist_lootqueuesettle" min="0" max="10000" step="250" placeholder="1000"></div>
-            <div class="field"><label>ดีเลย์ก่อนวาร์ป job ถัดไป (ms) — 0=วาร์ปทันที; ใช้เฉพาะ loot queue</label><input type="number" id="__assist_lootqueuewarpcooldown" min="0" max="10000" step="100" placeholder="0"></div>
+            <div class="field"><label>ดีเลย์ก่อนวาร์ป job ถัดไป/กลับจุดรอ (ms) — 0=วาร์ปทันที; ใช้เฉพาะ loot queue</label><input type="number" id="__assist_lootqueuewarpcooldown" min="0" max="10000" step="100" placeholder="0"></div>
             <div class="field"><label>retry pickup หลังวาร์ป (ครั้ง) — รอผลทีละคำสั่งก่อน retry; นับเพิ่มจากคำสั่งแรก</label><input type="number" id="__assist_lootqueuepickupretries" min="0" max="5" step="1" placeholder="2"></div>
             <div class="field"><label>รอผล pickup แต่ละครั้ง (ms) — ครบเวลาแล้ว retry; retry ครบจึงทิ้งงาน</label><input type="number" id="__assist_lootqueuetimeout" min="100" max="30000" step="50" placeholder="1000"></div>
             <div class="btns"><button id="__assist_applylootqueue">บันทึก Loot Queue</button><button id="__assist_lootqueuehomecurrent">ใช้พิกัดปัจจุบันเป็นจุดรอ</button></div>
@@ -11228,7 +11306,6 @@ function abBuffTimeoutMs() {
         homeX: parseInt(root.querySelector('#__assist_lootqueuehomex').value, 10),
         homeY: parseInt(root.querySelector('#__assist_lootqueuehomey').value, 10),
         claimDelayMs: parseInt(root.querySelector('#__assist_lootqueueclaimdelay').value, 10),
-        nearbySettleMs: parseInt(root.querySelector('#__assist_lootqueuesettle').value, 10),
         warpCooldownMs: parseInt(root.querySelector('#__assist_lootqueuewarpcooldown').value, 10),
         pickupRetryCount: parseInt(root.querySelector('#__assist_lootqueuepickupretries').value, 10),
         actionTimeoutMs: parseInt(root.querySelector('#__assist_lootqueuetimeout').value, 10),
@@ -12196,7 +12273,7 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     });
     for (const [sel, value] of [
       ['#__assist_lootqueuelocalurl', CFG.lootQueueLocalUrl], ['#__assist_lootqueuecloudflareurl', CFG.lootQueueCloudflareUrl], ['#__assist_lootqueuegroup', CFG.lootQueueGroup],
-      ['#__assist_lootqueuehomemap', CFG.lootQueueHomeMap], ['#__assist_lootqueuehomex', CFG.lootQueueHomeX], ['#__assist_lootqueuehomey', CFG.lootQueueHomeY], ['#__assist_lootqueueclaimdelay', CFG.lootQueueClaimDelayMs], ['#__assist_lootqueuesettle', CFG.lootQueueNearbySettleMs], ['#__assist_lootqueuewarpcooldown', CFG.lootQueueWarpCooldownMs], ['#__assist_lootqueuepickupretries', CFG.lootQueuePickupRetryCount], ['#__assist_lootqueuetimeout', CFG.lootQueueActionTimeoutMs],
+      ['#__assist_lootqueuehomemap', CFG.lootQueueHomeMap], ['#__assist_lootqueuehomex', CFG.lootQueueHomeX], ['#__assist_lootqueuehomey', CFG.lootQueueHomeY], ['#__assist_lootqueueclaimdelay', CFG.lootQueueClaimDelayMs], ['#__assist_lootqueuewarpcooldown', CFG.lootQueueWarpCooldownMs], ['#__assist_lootqueuepickupretries', CFG.lootQueuePickupRetryCount], ['#__assist_lootqueuetimeout', CFG.lootQueueActionTimeoutMs],
     ]) syncInput(sel, value);
     const lootQueueStatusEl = root.querySelector('#__assist_lootqueuestatus');
     if (lootQueueStatusEl) {
@@ -12215,8 +12292,7 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
         currentEl.textContent = job
           ? 'กำลังเก็บ: ' + job.itemName + '(#' + job.itemId + ') @ ' + job.map + ' (' + Math.round(job.x) + ',' + Math.round(job.y) + ')' + (phase ? ' · ' + phase : '')
           : status.returningHome ? 'กำลังกลับจุดรอ: ' + CFG.lootQueueHomeMap + (phase ? ' · ' + phase : '')
-            : status.nextClaimRemainingMs > 0 ? 'ทิ้งงานแล้ว · รอ ' + Math.ceil(status.nextClaimRemainingMs / 1000) + 's ก่อนมองคิวถัดไป'
-              : 'ไม่มีงานที่กำลังเก็บ' + (status.availableJobs ? ' · รอในคิว ' + status.availableJobs : '');
+            : 'ไม่มีงานที่กำลังเก็บ' + (status.availableJobs ? ' · รอในคิว ' + status.availableJobs : '');
         currentEl.style.color = job || status.returningHome ? '#f2ba6d' : '#9aa0a6';
       }
       const nextBtn = root.querySelector('#__assist_lootqueuenext');
