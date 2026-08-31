@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.1.2
+// @version      1.1.4
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -124,7 +124,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.1.2';
+  const VERSION = '1.1.4';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -1988,9 +1988,10 @@
     const role = () => ['farm', 'collector'].includes(CFG.lootQueueRole) ? CFG.lootQueueRole : 'off';
     const collectorGameReady = () => !!playerId && !!currentMap && !!activeWS && activeWS.readyState === WebSocket.OPEN;
     const claimResponseTimeoutMs = () => lootQueueTransportMode() === 'cloudflare' ? 8000 : 2000;
-    // Localhost ตอบงานแทบไม่มี latency; Cloudflare ให้ map transition settle สั้น ๆ
-    // ก่อน pickup เพื่อไม่ยิง packet ใน frame เดียวกับ MAP_NAME. ไม่เกี่ยวกับ timeout ของ item.
-    const postWarpPickupReadyMs = () => lootQueueTransportMode() === 'cloudflare' ? 500 : 0;
+    // Collector ใช้ค่าเดียวกับ Combat แต่เริ่มนับทันทีที่ MAP_NAME ยืนยันว่าถึงแมปแล้ว.
+    // ห้ามใช้ isWarpGuardActive() เพราะ guard นั้นต้องรอพิกัดเปลี่ยนได้ถึง 3s ซึ่งไม่ใช่
+    // ความหมายของค่า “หลังวาร์ปรอข้อมูลรอบตัว” ในหน้า Combat.
+    const collectorPostWarpSettleMs = () => Math.max(0, Math.min(3000, Number(CFG.postWarpTargetSettleMs) || 0));
     const special = (itemId) => Array.isArray(CFG.lootQueueItemIds) && CFG.lootQueueItemIds.includes(itemId);
     // Farmer-only decision seam. The selected list remains intact while
     // send-all is ON, so disabling it restores the old behaviour immediately.
@@ -2007,7 +2008,7 @@
     };
     const pickupResponseWaitMs = () => {
       const delay = Number(CFG.lootQueueActionTimeoutMs);
-      return Number.isFinite(delay) ? Math.max(1000, Math.min(30000, Math.round(delay))) : 1000;
+      return Number.isFinite(delay) ? Math.max(100, Math.min(30000, Math.round(delay))) : 1000;
     };
     const warpCooldownMs = () => {
       const delay = Number(CFG.lootQueueWarpCooldownMs);
@@ -2419,6 +2420,7 @@
           const movedAfterWarp = lastPlayerPositionPacketAt > (activeJob.intraMapWarpPositionAt || 0);
           if (!movedAfterWarp && now - activeJob.intraMapWarpRequestedAt < SAME_MAP_WARP_SETTLE_MS) return;
           activeJob.intraMapWarpRequestedAt = 0;
+          if (activeJob.warpPresenceCheckPending) activeJob.collectorPostWarpSettleUntil = now + collectorPostWarpSettleMs();
           stage('map-ready', movedAfterWarp ? 'วาร์ปในแมปแล้ว → ส่ง pickup' : 'ยังไม่เห็นพิกัดหลังวาร์ป → ส่ง pickup ตามปกติ');
         }
         // Server มี pathing ของ ground item อยู่แล้ว: pickup จะสั่งให้ server เดินหา item จริง
@@ -2426,21 +2428,15 @@
         if (!activeJob.mapReachedAt) {
           activeJob.mapReachedAt = now;
           activeJob.mapReachedPositionAt = activeJob.warpPositionAt || lastPlayerPositionPacketAt;
+          if (activeJob.warpPresenceCheckPending) activeJob.collectorPostWarpSettleUntil = now + collectorPostWarpSettleMs();
           stage('map-ready', 'ถึงแมปแล้ว → ให้ server เดินหา ' + job.itemName);
         }
-        const movedAfterMapChange = lastPlayerPositionPacketAt > (activeJob.mapReachedPositionAt || 0);
-        // ใช้ warp guard เดียวกับ Combat/AB: รอพิกัดใหม่ แล้วรอ packet รอบตัวตาม
-        // CFG.postWarpTargetSettleMs ก่อนส่ง pickup. แก้ความต่างเครื่องที่ MAP_NAME มาก่อน state จริง.
-        if (!activeJob.pickupAt && isWarpGuardActive(now)) {
-          stage('warp-guard', 'รอข้อมูลหลังวาร์ป (พิกัด/packet รอบตัว) ก่อน pickup');
+        if (!activeJob.pickupAt && now < (activeJob.collectorPostWarpSettleUntil || 0)) {
+          const remainingMs = Math.max(0, activeJob.collectorPostWarpSettleUntil - now);
+          stage('collector-post-warp-settle', 'รอข้อมูลหลังวาร์ป ' + remainingMs + 'ms ก่อนตรวจ drop/pickup');
           return;
         }
-        const mapReadyWaitMs = postWarpPickupReadyMs();
-        if (!activeJob.pickupAt && !movedAfterMapChange && now - activeJob.mapReachedAt < mapReadyWaitMs) {
-          stage('map-settle', 'รอ map-ready ' + mapReadyWaitMs + 'ms ก่อน pickup (' + lootQueueTransportLabel() + ')');
-          return;
-        }
-        // ผ่าน guard เดียวกับ Combat แล้วจึงเช็ค ground item ที่ client เห็นจริง.
+        // ผ่านช่วงรอข้อมูลหลังวาร์ปของ Collector แล้วจึงเช็ค ground item ที่ client เห็นจริง.
         // ไม่เห็น packet drop ยังไม่ใช่หลักฐานว่าของหาย: ให้ server ยืนยันเพียง
         // 1 ครั้ง แล้ว discard ทันทีเมื่อ FAIL/เงียบ แทนการ retry ทั้งชุด.
         if (!activeJob.pickupAt && activeJob.warpPresenceCheckPending) {
@@ -9134,7 +9130,7 @@ function abBuffTimeoutMs() {
       if ('claimDelayMs' in values && Number.isFinite(values.claimDelayMs)) CFG.lootQueueClaimDelayMs = Math.max(0, Math.min(30000, Math.round(values.claimDelayMs)));
       if ('nearbySettleMs' in values && Number.isFinite(values.nearbySettleMs)) CFG.lootQueueNearbySettleMs = Math.max(0, Math.min(10000, Math.round(values.nearbySettleMs)));
       if ('warpCooldownMs' in values && Number.isFinite(values.warpCooldownMs)) CFG.lootQueueWarpCooldownMs = Math.max(0, Math.min(10000, Math.round(values.warpCooldownMs)));
-      if ('actionTimeoutMs' in values && Number.isFinite(values.actionTimeoutMs)) CFG.lootQueueActionTimeoutMs = Math.max(1000, Math.min(30000, Math.round(values.actionTimeoutMs)));
+      if ('actionTimeoutMs' in values && Number.isFinite(values.actionTimeoutMs)) CFG.lootQueueActionTimeoutMs = Math.max(100, Math.min(30000, Math.round(values.actionTimeoutMs)));
       if ('pickupRetryCount' in values && Number.isFinite(values.pickupRetryCount)) CFG.lootQueuePickupRetryCount = Math.max(0, Math.min(5, Math.round(values.pickupRetryCount)));
       saveConfigDebounced();
       lootQueue.reconnect();
@@ -10660,7 +10656,7 @@ function abBuffTimeoutMs() {
             <div class="field"><label>รอหลังทิ้งงานก่อนหา job ถัดไป (ms) — FAIL/เงียบครบ retry; เก็บสำเร็จจะต่อคิวทันที</label><input type="number" id="__assist_lootqueuesettle" min="0" max="10000" step="250" placeholder="1000"></div>
             <div class="field"><label>ดีเลย์ก่อนวาร์ป job ถัดไป (ms) — 0=วาร์ปทันที; ใช้เฉพาะ loot queue</label><input type="number" id="__assist_lootqueuewarpcooldown" min="0" max="10000" step="100" placeholder="0"></div>
             <div class="field"><label>retry pickup หลังวาร์ป (ครั้ง) — รอผลทีละคำสั่งก่อน retry; นับเพิ่มจากคำสั่งแรก</label><input type="number" id="__assist_lootqueuepickupretries" min="0" max="5" step="1" placeholder="2"></div>
-            <div class="field"><label>รอผล pickup แต่ละครั้ง (ms) — ครบเวลาแล้ว retry; retry ครบจึงทิ้งงาน</label><input type="number" id="__assist_lootqueuetimeout" min="1000" max="30000" step="500" placeholder="1000"></div>
+            <div class="field"><label>รอผล pickup แต่ละครั้ง (ms) — ครบเวลาแล้ว retry; retry ครบจึงทิ้งงาน</label><input type="number" id="__assist_lootqueuetimeout" min="100" max="30000" step="50" placeholder="1000"></div>
             <div class="btns"><button id="__assist_applylootqueue">บันทึก Loot Queue</button><button id="__assist_lootqueuehomecurrent">ใช้พิกัดปัจจุบันเป็นจุดรอ</button></div>
             <div id="__assist_lootqueuecurrent" style="font-size:10px;color:#9aa0a6;margin:5px 0 4px">ไม่มีงานที่กำลังเก็บ</div>
             <div class="btns"><button id="__assist_lootqueuenext" class="off" disabled title="ไม่มี drop ที่กำลังเก็บ">⏭ ข้ามงานปัจจุบัน</button></div>

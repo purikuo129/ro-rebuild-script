@@ -20,6 +20,12 @@ assert.match(source, /done\.settleUntil = nowMs\(\);[\s\S]{0,160}เก็บส
   'a successful pickup must chain immediately');
 assert.match(source, /const pickupResponseWaitMs = \(\) => \{[\s\S]{0,180}CFG\.lootQueueActionTimeoutMs[\s\S]{0,180}\};/,
   'the configured pickup response wait must control each attempt');
+assert.match(source, /const pickupResponseWaitMs = \(\) => \{[\s\S]{0,180}Math\.max\(100, Math\.min\(30000, Math\.round\(delay\)\)\)/,
+  'pickup response wait must allow a user-configured 100ms minimum');
+assert.match(source, /'actionTimeoutMs' in values[\s\S]{0,180}CFG\.lootQueueActionTimeoutMs = Math\.max\(100, Math\.min\(30000, Math\.round\(values\.actionTimeoutMs\)\)\);/,
+  'the public Loot Queue config setter must preserve values below 1000ms');
+assert.match(source, /id="__assist_lootqueuetimeout" min="100" max="30000" step="50"/,
+  'the Loot Queue UI must accept values below 1000ms');
 assert.match(source, /pickupResponseDueAt = now \+ pickupResponseWaitMs\(\);/,
   'each pickup attempt must use the configured response wait');
 assert.match(source, /รอผล pickup แต่ละครั้ง \(ms\) — ครบเวลาแล้ว retry; retry ครบจึงทิ้งงาน/,
@@ -41,9 +47,19 @@ assert.match(source, /onDropDespawn\(dropId\)/,
 assert.match(source, /warpPresenceCheckPending = true;/,
   'every collector warp must schedule one post-warp ground-item check');
 assert.match(source, /const observedDrop = recentDrops\.get\(job\.dropId\);[\s\S]{0,460}pickupWithoutObservedDrop = !observedDrop;/,
-  'after the shared post-warp guard, collector must match the observed ground drop before pickup');
+  'after the configured post-warp settle, collector must match the observed ground drop before pickup');
 assert.match(source, /itemId ไม่ตรงกับ job/, 'a mismatched ground item must discard immediately');
 assert.match(source, /pickupWithoutObservedDrop[\s\S]{0,320}server ตอบ pickup FAIL/,
   'an unseen drop gets one server-authoritative pickup fallback, then discards on FAIL');
+const collectorPostWarpSection = source.slice(
+  source.indexOf("if (!activeJob.mapReachedAt)"),
+  source.indexOf('const sendPickupAttempt = (label)')
+);
+assert.doesNotMatch(collectorPostWarpSection, /isWarpGuardActive\(now\)/,
+  'collector pickup must not inherit Combat\'s 3s fresh-position guard; it waits only the shared configured post-warp settle value');
+assert.match(collectorPostWarpSection, /collectorPostWarpSettleMs\(\)/,
+  'collector must use the Combat post-warp settle setting directly from MAP_NAME arrival');
+assert.match(collectorPostWarpSection, /collector-post-warp-settle/,
+  'collector must expose the dedicated post-warp settle stage');
 
 console.log('loot-queue-collector-flow regression: PASS');

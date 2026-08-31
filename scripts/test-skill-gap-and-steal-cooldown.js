@@ -10,8 +10,8 @@ const source = fs.readFileSync('RO Rebuild Pure.js', 'utf8');
 const published = fs.readFileSync('ro-rebuild-pure.user.js', 'utf8');
 
 assert.strictEqual(published, source, 'published userscript must match the source copy');
-assert.match(source, /@version\s+1\.1\.2/);
-assert.match(source, /const VERSION = '1\.1\.2';/);
+assert.match(source, /@version\s+1\.1\.4/);
+assert.match(source, /const VERSION = '1\.1\.4';/);
 assert.match(source, /'skillEnabled', 'skills', 'disabledSkillIds', 'skillCommandGapMs'/,
   'the global gap must persist');
 assert.match(source, /skillCommandGapMs: 1500,\s*\/\/ เว้นเฉพาะระหว่างสกิลคนละชนิด/,
