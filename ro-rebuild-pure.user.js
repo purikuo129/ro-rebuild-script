@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.1.0
+// @version      1.1.1
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -124,7 +124,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.1.0';
+  const VERSION = '1.1.1';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -134,7 +134,7 @@
   const PERSIST_KEYS = [
     'healEnabled', 'healAtPercent', 'healItems', 'healMode', 'healDelayMs', 'healAtMax',
     'buffEnabled', 'buffItems', 'buffRebuffDelayMs', 'autoClearConsoleMin', 'monitorServerEnabled', 'monitorServerUrl', 'monitorSendIntervalMs',
-    'skillEnabled', 'skills', 'disabledSkillIds',
+    'skillEnabled', 'skills', 'disabledSkillIds', 'skillCommandGapMs',
     'lootEnabled', 'lootDelayAfterDropMs', 'lootPostKillSettleMs', 'lootUseKillPos', 'pickRadiusKill', 'filter', 'sendThrottleMs', 'lootQueueRole', 'lootQueueUrl', 'lootQueueTransport', 'lootQueueLocalUrl', 'lootQueueCloudflareUrl', 'lootQueueGroup', 'lootQueueHomeMap', 'lootQueueHomeX', 'lootQueueHomeY', 'lootQueueItemIds', 'lootQueueSendAll', 'lootQueueClaimDelayMs', 'lootQueueNearbySettleMs', 'lootQueueActionTimeoutMs', 'lootQueueWarpCooldownMs', 'lootQueuePickupRetryCount',
     'warpLootEnabled',
     'combatEnabled', 'targetWhitelist', 'targetBlacklist', 'attackRange', 'rangedAttackRange', 'attackProbeMs', 'hiddenWaitMonsters', 'hiddenWaitSec', 'hiddenSightEnabled',
@@ -330,10 +330,10 @@
     "maxDistance": 2,
     "minDistance": 0,
     "spMin": 10,
-    "cooldownMs": 100
+    "cooldownMs": 800
     }],                   // รายการ skill config
     disabledSkillIds: [],         // skillId ที่ toggle ปิดชั่วคราว
-    skillCommandGapMs: 1500,      // เว้นคำสั่งสกิลทุกชนิดอย่างน้อย 1.5s (รวมปุ่ม “ใช้ skill เดี๋ยวนี้”)
+    skillCommandGapMs: 1500,      // เว้นเฉพาะระหว่างสกิลคนละชนิด (รวมปุ่ม “ใช้ skill เดี๋ยวนี้”)
 
     // ---------- AB BUFF (รับ Increase Agility + Blessing จาก Acolyte) ----------
     abBuffEnabled: false,
@@ -4652,6 +4652,10 @@
   const STORAGE_WARP_TIMEOUT_MS = 20000;
   const STORAGE_NPC_SPAWN_WAIT_MS = 10000;
   const STORAGE_ABORT_RETRY_MS = 10000;
+  const STORAGE_STATE_TIMEOUT_MS = 60000;
+  // ฝากทุกอย่างอาจมี item/slot เกิน 60 รายการ จึง timeout เฉพาะเมื่อไม่มี
+  // packet ย้ายของออกไปจริง ๆ ต่อเนื่อง—not by the total duration of the run.
+  const STORAGE_TRANSFER_STALL_TIMEOUT_MS = 15000;
   const STORAGE_KAFRA_WARP_OFFSET = 1;
 
   function storageKafraPoint() {
@@ -4675,9 +4679,14 @@
     if (storageState !== s) dbg('🏦 Storage:', storageState, '→', s);
     storageState = s;
     storageStateAt = nowMs();
+    if (s === 'MOVE_ITEMS' || s === 'WITHDRAW_ITEMS') storageTransferProgressAt = storageStateAt;
   }
   function abortStorage(reason) {
     log('⚠️ ยกเลิกฝาก:', reason);
+    // ถ้า Kafra เปิด Storage อยู่ ต้องปิดก่อนออกจาก flow ไม่เช่นนั้น UI เกมค้าง
+    // แม้เราจะวาร์ปกลับแล้วก็ตาม.
+    const storageDialogOpen = ['STORAGE_OPENED', 'MOVE_ITEMS', 'WITHDRAW_ITEMS', 'CLOSE_STORAGE'].includes(storageState);
+    if (storageDialogOpen) sendStorageClose();
     storageMoveQueue = []; storageMoveIdx = 0; storageNpcId = null;
     // น้ำหนักเดิมยังเต็มอยู่ จึงต้องพักก่อนลองใหม่ มิฉะนั้นจะ WARP_TO_KAFRA → RETURN_FARM ไม่สิ้นสุด.
     storageRetryAt = nowMs() + STORAGE_ABORT_RETRY_MS;
@@ -4828,8 +4837,14 @@
       return;
     }
 
-    // === watchdog: ค้าง >60s → ยกเลิก ===
-    if (now - storageStateAt > 60000) { abortStorage('timeout (' + storageState + ' 60s)'); return; }
+    // === watchdog: state ทั่วไป 60s, แต่ช่วงย้ายของวัดเฉพาะเวลาที่ไม่มี progress ===
+    const storageTransferActive = storageState === 'MOVE_ITEMS' || storageState === 'WITHDRAW_ITEMS';
+    const storageLastProgressAt = storageTransferActive ? storageTransferProgressAt : storageStateAt;
+    const storageTimeoutMs = storageTransferActive ? STORAGE_TRANSFER_STALL_TIMEOUT_MS : STORAGE_STATE_TIMEOUT_MS;
+    if (now - storageLastProgressAt > storageTimeoutMs) {
+      abortStorage((storageTransferActive ? 'ไม่มี progress ย้ายของ' : 'timeout') + ' (' + storageState + ' ' + (storageTimeoutMs / 1000) + 's)');
+      return;
+    }
 
     if (storageState === 'WARP_TO_KAFRA') {
       const elapsed = now - storageStateAt;
@@ -4930,7 +4945,10 @@
       const item = storageMoveQueue[storageMoveIdx];
       const moveId = item.isEquipment ? item.invId : item.itemId;
       log('🏦 ฝาก', nameOf(item.itemId) + (item.isEquipment ? ' (slot ' + item.invId + ')' : ' ×' + item.amount));
-      sendStorageMove(moveId, item.amount);
+      if (!sendStorageMove(moveId, item.amount)) {
+        log('⚠️ ส่งคำสั่งฝากไม่สำเร็จ → จะลองใหม่');
+        return;
+      }
       // ★ optimistic: ลบ slot + ลด inventory count (server จะส่ง 0x32 removal ยืนยัน)
       if (item.isEquipment) {
         const slots = equipmentSlots.get(item.itemId);
@@ -4948,6 +4966,7 @@
       }
       storageMoveIdx++;
       storageLastMoveAt = now;
+      storageTransferProgressAt = now;
       return;
     }
     if (storageState === 'WITHDRAW_ITEMS') {
@@ -4965,12 +4984,16 @@
       }
       const item = storageMoveQueue[storageMoveIdx];
       log('🏦 หยิบกลับ', nameOf(item.itemId) + ' ×' + item.amount);
-      sendStorageWithdraw(item.itemId, item.amount);
+      if (!sendStorageWithdraw(item.itemId, item.amount)) {
+        log('⚠️ ส่งคำสั่งหยิบกลับไม่สำเร็จ → จะลองใหม่');
+        return;
+      }
       inventory.set(item.itemId, (inventory.get(item.itemId) || 0) + item.amount);
       heal.updateInventoryStock(item.itemId, inventory.get(item.itemId));
       storageRegularItems.set(item.itemId, Math.max(0, (storageRegularItems.get(item.itemId) || 0) - item.amount));
       storageMoveIdx++;
       storageLastMoveAt = now;
+      storageTransferProgressAt = now;
       return;
     }
     if (storageState === 'CLOSE_STORAGE') {
@@ -5345,17 +5368,21 @@
     if (!(itemId > 0) || !(amount > 0)) return;
     sessionLootItems.set(itemId, (sessionLootItems.get(itemId) || 0) + amount);
   }
-  const STEAL_RESULT_WAIT_MS = 800;
   const STEAL_MAX_RANGE = 2;
   const STEAL_STABLE_MS = 400;
   // Rebuild: Skill.Cloaking = 127, self-cast packet เป็นหลักฐานก่อนเข้า HIDDEN_WAIT
   const CLOAKING_SKILL_ID = 127;
   const CLOAKING_STATUS_ID = 0x1c;
   const CLOAKING_EVIDENCE_WINDOW_MS = 2000;
+  // Steal ใช้ cooldown ที่ตั้งจาก UI เป็นเวลารอผลและก่อน retry โดยตรง.
+  // 250ms เป็น lower bound ความปลอดภัยของ command lane ไม่ใช่ delay ซ่อนของ Steal.
+  function stealResultWaitMs(skill) {
+    const cooldown = Number(skill && skill.cooldownMs);
+    return Number.isFinite(cooldown) ? Math.max(250, Math.min(10000, Math.round(cooldown))) : 800;
+  }
   function confirmStealInventoryIncrease() {
     if (!target || !target.stealPending || !target.stealInventorySnapshot) return;
-    const elapsed = nowMs() - target.stealPendingAt;
-    if (elapsed < 0 || elapsed > STEAL_RESULT_WAIT_MS) return;
+    if (nowMs() > (target.stealResultDueAt || target.stealPendingAt)) return;
     for (const [itemId, count] of inventory) {
       if (count > (target.stealInventorySnapshot.get(itemId) || 0)) {
         // 0x32 ไม่ได้บอก source ของไอเท็ม จึงเก็บไว้แค่ชื่อสำหรับ log; 0x1d จะเป็นตัวตัดสิน success
@@ -5368,6 +5395,7 @@
     if (!target || !target.stealPending) return;
     target.stealSuccess = true;
     target.stealPending = false;
+    target.stealResultDueAt = 0;
     target.stealSuccessAt = nowMs();
     target.stealInventorySnapshot = null;
     // Skill packet อาจตัด auto-attack เดิม: resume Attack หนึ่งครั้งใน tick ถัดไป
@@ -5387,6 +5415,7 @@
   let storageMoveQueue = [];      // [{itemId, amount, invId, isEquipment}]
   let storageMoveIdx = 0;         // index ใน queue ที่กำลังส่ง
   let storageLastMoveAt = 0;      // throttle MOVE_TO_KAFRA + MOVE_ITEMS
+  let storageTransferProgressAt = 0; // packet ย้าย item ล่าสุดที่ส่งได้สำเร็จ
   let storageWarpLastSentAt = 0;  // เวลา warp ไป Kafra ครั้งล่าสุด (retry แบบมีจังหวะ)
   let storageWarpAttempts = 0;    // จำนวนครั้งที่ลอง warp ใน storage run นี้
   let storageKafraMapReadyAt = 0; // MAP_NAME ยืนยันแล้ว รอ NPC spawn ตั้งแต่เวลาใด
@@ -5922,23 +5951,24 @@
   //   targeted (sub=01): [1d][01][targetId:4][skillId:1][level:1]  — Bash, Charge Arrow
   //   ground (sub=04):   [1d][04][x:2][y:2][skillId:1][level:1]    — Arrow Shower (เลือกพื้นที่)
   //   AoE/self (sub=05): [1d][05][skillId:2 LE][level:1]           — Magnum Break, Quicken
-  let lastSkillPacketAt = 0;      // global cast lane — ต่างจาก cooldown ที่เป็นราย skill
+  let lastSkillPacketAt = 0, lastSkillPacketId = null; // global cast lane — ต่างจาก cooldown ที่เป็นราย skill
   let manualSkillQueue = [];
   let manualSkillQueueTimer = null;
   let autoSupportQueue = [];      // snapshot คิว self/ally เพื่อไม่ scan แล้วสลับลำดับทุก tick
   function skillCommandGapMs() {
     return Math.max(250, Number(CFG.skillCommandGapMs) || 1500);
   }
-  function skillCommandWaitMs(now = nowMs()) {
+  function skillCommandWaitMs(nextSkillId, now = nowMs()) {
+    // Retry สกิลเดิม (โดยเฉพาะ Steal) ใช้ cooldown ของตัวเอง; global gap มีไว้กันสกิลคนละชนิดชนกัน.
+    if (lastSkillPacketId === Number(nextSkillId)) return 0;
     return Math.max(0, lastSkillPacketAt + skillCommandGapMs() - now);
   }
 
   function sendSkill(skillId, level, targetId, groundX, groundY) {
     if (!activeWS || activeWS.readyState !== 1) return false;
-    // The server may ignore a second skill packet while it is resolving the
-    // first.  This is a single lane for all modes, not a replacement for each
-    // skill's own cooldown/interval timer.
-    if (skillCommandWaitMs() > 0) return false;
+    // Serialise only transitions between different skills.  Repeating one
+    // skill is paced by that skill's own cooldown/result lifecycle.
+    if (skillCommandWaitMs(skillId) > 0) return false;
     if (targetId != null) {
       // ★ targeted: [1d][01][targetId:4][skillId:1][level:1]
       const b8 = new Uint8Array(8);
@@ -5966,6 +5996,7 @@
       activeWS.send(b);
     }
     lastSkillPacketAt = nowMs();
+    lastSkillPacketId = Number(skillId);
     return true;
   }
   // ★ Auto-Skill tracking (mirror bot.js:48-56)
@@ -6043,7 +6074,7 @@
       manualSkillQueue = [];
       return;
     }
-    const wait = skillCommandWaitMs();
+    const wait = skillCommandWaitMs(manualSkillQueue[0].skill.skillId);
     if (wait > 0) {
       manualSkillQueueTimer = setTimeout(drainManualSkillQueue, wait + 10);
       return;
@@ -6060,7 +6091,8 @@
       manualSkillQueue.unshift(job);
     }
     if (manualSkillQueue.length) {
-      manualSkillQueueTimer = setTimeout(drainManualSkillQueue, skillCommandGapMs() + 10);
+      const next = manualSkillQueue[0];
+      manualSkillQueueTimer = setTimeout(drainManualSkillQueue, skillCommandWaitMs(next.skill.skillId) + 10);
     }
   }
 
@@ -7247,8 +7279,9 @@ function abBuffTimeoutMs() {
         if (skill.skillId === 61) {
           if (target.stealSuccess) continue;
           if (target.stealPending) {
-            if (now - target.stealPendingAt < STEAL_RESULT_WAIT_MS) continue; // รอผลให้ครบ window ก่อน
+            if (now < (target.stealResultDueAt || target.stealPendingAt)) continue; // รอผลตาม cooldown ของ Steal ก่อน
             target.stealPending = false;
+            target.stealResultDueAt = 0;
             target.stealInventorySnapshot = null;
           }
           const maxTries = skill.maxUsesPerTarget || 3;
@@ -7324,6 +7357,7 @@ function abBuffTimeoutMs() {
             target.stealAttempts = (target.stealAttempts || 0) + 1;
             target.stealPending = true;
             target.stealPendingAt = now;
+            target.stealResultDueAt = now + stealResultWaitMs(skill);
             target.stealInventorySnapshot = new Map(inventory);
           }
           if (skill.targeted && !skill.selfCast && !skill.ally) {
@@ -8839,6 +8873,12 @@ function abBuffTimeoutMs() {
     // ---------- Auto-Skill ----------
     skillOn()  { CFG.skillEnabled = true; resetAutoSupportQueue(); log('✨ Auto-Skill: ON'); },
     skillOff() { CFG.skillEnabled = false; resetAutoSupportQueue(); log('✨ Auto-Skill: OFF'); },
+    setSkillCommandGap(ms) {
+      const value = Math.max(250, Math.min(5000, Math.round(Number(ms) || 1500)));
+      CFG.skillCommandGapMs = value;
+      saveConfigDebounced();
+      log('✨ เว้นระหว่างสกิลคนละชนิด =', value + 'ms');
+    },
     // ★ setSkills([{skillId:3, level:10, targeted:true, maxUsesPerTarget:2, maxDistance:2, spMin:15, cooldownMs:2000}, ...])
     setSkills(skills) {
       CFG.skills = (skills || []).filter(s => s && s.skillId != null).map(s => ({
@@ -9581,7 +9621,7 @@ function abBuffTimeoutMs() {
     { name: 'Charge Arrow', skillId: 25, level: 1, targeted: true, maxUsesPerTarget: 1, maxDistance: 10, spMin: 20, cooldownMs: 60000, job: 'Archer/Hunter', desc: 'ดันมอนออกไกล' },
     { name: 'Arrow Shower', skillId: 26, level: 5, ground: true, maxUsesPerTarget: 1, maxDistance: 10, mobCountMin: 2, spMin: 20, cooldownMs: 60000, job: 'Hunter', desc: 'AoE ธนู (เลือกพื้นที่)' },
     // ---- Thief/Assassin/Rogue (จาก packet capture) ----
-    { name: 'Steal', skillId: 61, level: 10, targeted: true, maxUsesPerTarget: 3, maxDistance: 2, spMin: 10, cooldownMs: 100, job: 'Thief', desc: 'ขโมยไอเทมจากมอนสเตอร์' },
+    { name: 'Steal', skillId: 61, level: 10, targeted: true, maxUsesPerTarget: 3, maxDistance: 2, spMin: 10, cooldownMs: 800, job: 'Thief', desc: 'ขโมยไอเทมจากมอนสเตอร์; cooldown คือเวลารอผล/retry' },
     { name: 'Sonic Blow', skillId: 126, level: 10, targeted: true, maxUsesPerTarget: 1, maxDistance: 2, spMin: 40, cooldownMs: 120000, job: 'Assassin/SinX', desc: 'ฟัน 8 ครั้งรวด (ดาเมจหนัก)' },
     // ============================================================
     // ★★ สกิลทั้งหมดจาก Skills.toml ของ RagnarokRebuildTcp (server ตัวจริงของเกมนี้)
@@ -10599,6 +10639,8 @@ function abBuffTimeoutMs() {
               <button id="__assist_skillnow" class="primary">ใช้ skill เดี๋ยวนี้</button>
               <button id="__assist_manageskill">📋 จัดการ skill</button>
             </div>
+            <div class="field"><label>เว้นระหว่างสกิลคนละชนิด (ms) — Steal ซ้ำใช้ cooldown ของ Steal เอง</label><input type="number" id="__assist_skillgap" min="250" max="5000" step="50" placeholder="1500"></div>
+            <div class="btns"><button id="__assist_applyskillgap">บันทึก Skill Gap</button></div>
             <div style="font-size:10px;color:#9aa0a6;margin-top:4px;">★ บัพตัวเอง Blessing / Agility / Kyrie เช็ค status จาก server และใช้เรียงตาม list; สกิลอื่นใช้ cooldown fallback</div>
             <div id="__assist_skillcountdown" style="font-size:10px;color:#9aa0a6;margin-top:4px;line-height:1.6">(ยังไม่ตั้ง skill)</div>
           </div>
@@ -11123,6 +11165,9 @@ function abBuffTimeoutMs() {
     root.querySelector('#__assist_skillbtn').addEventListener('click', () => CFG.skillEnabled ? ASSIST.skillOff() : ASSIST.skillOn());
     root.querySelector('#__assist_skillnow').addEventListener('click', () => ASSIST.skillNow());
     root.querySelector('#__assist_manageskill').addEventListener('click', () => openSkillPopup());
+    root.querySelector('#__assist_applyskillgap').addEventListener('click', () => {
+      ASSIST.setSkillCommandGap(root.querySelector('#__assist_skillgap').value);
+    });
     root.querySelector('#__assist_lootmode').addEventListener('change', e => ASSIST.setLootMode(e.target.value));
     root.querySelector('#__assist_manageonly').addEventListener('click', () => openItemListPopup('only'));
     root.querySelector('#__assist_manageexcept').addEventListener('click', () => openItemListPopup('except'));
@@ -12197,6 +12242,8 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     // skill config sync + countdown display
     const skillBtn = root.querySelector('#__assist_skillbtn');
     if (skillBtn) { skillBtn.textContent = 'Skill: ' + (CFG.skillEnabled ? 'ON' : 'OFF'); skillBtn.className = CFG.skillEnabled ? 'on' : 'off'; }
+    const skillGapInput = root.querySelector('#__assist_skillgap');
+    if (skillGapInput && !isEditing(skillGapInput)) skillGapInput.value = skillCommandGapMs();
     const skCdEl = root.querySelector('#__assist_skillcountdown');
     if (skCdEl) {
       if (!CFG.skills || !CFG.skills.length) {
