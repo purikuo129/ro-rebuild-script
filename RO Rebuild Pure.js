@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.1.1
+// @version      1.1.2
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -124,7 +124,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.1.1';
+  const VERSION = '1.1.2';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -2222,6 +2222,10 @@
         const attempts = activeJob.pickupAttempts || 0;
         const limit = pickupRetryCount();
         activeJob.lastActionAt = now; // server ตอบแล้ว จึงไม่ใช่ timeout แบบไม่มี action
+        if (activeJob.pickupWithoutObservedDrop) {
+          discardActive('ไม่พบ drop packet และ server ตอบ pickup FAIL หลังตรวจสอบ 1 ครั้ง');
+          return true;
+        }
         if (attempts >= 1 + limit) {
           discardActive('server ตอบ pickup FAIL ครบ ' + limit + ' retry');
           return true;
@@ -2234,6 +2238,12 @@
       onPickupTakenByOther(dropId) {
         if (!activeJob || activeJob.settleUntil || activeJob.job.dropId !== dropId) return false;
         return discardActive('ผู้เล่นอื่นเก็บ drop นี้ไปแล้ว');
+      },
+      // 0x36 reason=2 คือ server ยืนยันว่า ground item ถูกเก็บ/หายไปแล้ว.
+      // หากมาถึงหลัง collector วาร์ปมา ไม่ต้องส่ง pickup ซ้ำให้เสียเวลา.
+      onDropDespawn(dropId) {
+        if (!activeJob || activeJob.settleUntil || activeJob.job.dropId !== dropId) return false;
+        return discardActive('drop หายก่อน pickup (DESPAWN reason=2)');
       },
       // รับ WARP_FAIL (0x2a) เฉพาะงาน collector ที่กำลังรอข้ามแมปอยู่
       // คืน true เพื่อบอก packet router ว่าไม่ต้องส่งต่อให้ Warp-to-Loot flow เดิม
@@ -2374,6 +2384,7 @@
               activeJob.forceRandomWarp = false;
               activeJob.crossMapExactTarget = !useRandomSpawn;
               activeJob.warpPositionAt = lastPlayerPositionPacketAt;
+              activeJob.warpPresenceCheckPending = true;
               lastWarpAt = now;
               log(useRandomSpawn
                 ? '📮 Loot Queue: re-check แล้ววาร์ปจุดเดินได้ใน ' + job.map + ' (server เลือกจุด)'
@@ -2397,6 +2408,7 @@
             activeJob.intraMapWarpAttempted = true;
             activeJob.intraMapWarpRequestedAt = now;
             activeJob.intraMapWarpPositionAt = lastPlayerPositionPacketAt;
+            activeJob.warpPresenceCheckPending = true;
             lastWarpAt = now;
             stage('same-map-warp', 'ของไกล ' + sameMapDistance.toFixed(1) + ' ช่อง → วาร์ปไปเก็บ ' + job.itemName);
             log('📮 Loot Queue: อยู่แมปเดียวกันแต่ไกล ' + sameMapDistance.toFixed(1) + ' ช่อง → วาร์ปไปพิกัด drop');
@@ -2428,6 +2440,23 @@
           stage('map-settle', 'รอ map-ready ' + mapReadyWaitMs + 'ms ก่อน pickup (' + lootQueueTransportLabel() + ')');
           return;
         }
+        // ผ่าน guard เดียวกับ Combat แล้วจึงเช็ค ground item ที่ client เห็นจริง.
+        // ไม่เห็น packet drop ยังไม่ใช่หลักฐานว่าของหาย: ให้ server ยืนยันเพียง
+        // 1 ครั้ง แล้ว discard ทันทีเมื่อ FAIL/เงียบ แทนการ retry ทั้งชุด.
+        if (!activeJob.pickupAt && activeJob.warpPresenceCheckPending) {
+          activeJob.warpPresenceCheckPending = false;
+          const observedDrop = recentDrops.get(job.dropId);
+          if (observedDrop && Number(observedDrop.itemId) !== Number(job.itemId)) {
+            discardActive('dropId เจอแต่ itemId ไม่ตรงกับ job');
+            return;
+          }
+          activeJob.pickupWithoutObservedDrop = !observedDrop;
+          if (observedDrop) {
+            stage('drop-present', 'พบ drop บนพื้น → ส่ง pickup ' + job.itemName);
+          } else {
+            stage('drop-unseen', 'ยังไม่พบ packet drop → ให้ server ตรวจ pickup 1 ครั้ง');
+          }
+        }
         const sendPickupAttempt = (label) => {
           if (!sendPickup(job.dropId)) return false;
           activeJob.pickupAt = activeJob.pickupAt || now;
@@ -2454,6 +2483,10 @@
         if (activeJob.waitingPickupResult) {
           if (now < activeJob.pickupResponseDueAt) return;
           activeJob.waitingPickupResult = false;
+          if (activeJob.pickupWithoutObservedDrop) {
+            discardActive('ไม่พบ drop packet และ server เงียบหลัง pickup ตรวจสอบ 1 ครั้ง');
+            return;
+          }
           if ((activeJob.pickupAttempts || 0) >= 1 + pickupRetryCount()) {
             discardActive('server เงียบหลัง pickup ครบ ' + pickupRetryCount() + ' retry');
             return;
@@ -3226,8 +3259,9 @@
     else if (op === 0x36 && u.length >= 9) {
       const eid = u32(u, 1);
       const reason = u32(u, 5);
-      if (reason === 2) {
-        // ของถูกเก็บไป → ลบจาก queue/recentDrops/warpQueue
+        if (reason === 2) {
+          // ของถูกเก็บไป → ลบจาก queue/recentDrops/warpQueue
+        const lootQueueDespawned = lootQueue.onDropDespawn(eid);
         if (queue.has(eid)) {
           const it = queue.get(eid);
           queue.delete(eid);
@@ -3235,6 +3269,7 @@
         }
         recentDrops.delete(eid);
         warpQueue.delete(eid);
+        if (lootQueueDespawned) log('🗑️ Loot Queue: drop despawn → ทิ้งงานนี้');
       }
     }
     // ============== SELL / INVENTORY packets ==============

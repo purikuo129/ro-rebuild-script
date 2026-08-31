@@ -36,5 +36,14 @@ assert.match(source, /if \(nowMs\(\) < nextClaimAt\) return;/,
   'the next-job delay must gate all collector claims');
 assert.match(source, /onPickupTakenByOther\(dropId\)/,
   'a confirmed pickup by another entity must retire the stale collector job');
+assert.match(source, /onDropDespawn\(dropId\)/,
+  'a drop despawn observed after warp must retire the stale collector job');
+assert.match(source, /warpPresenceCheckPending = true;/,
+  'every collector warp must schedule one post-warp ground-item check');
+assert.match(source, /const observedDrop = recentDrops\.get\(job\.dropId\);[\s\S]{0,460}pickupWithoutObservedDrop = !observedDrop;/,
+  'after the shared post-warp guard, collector must match the observed ground drop before pickup');
+assert.match(source, /itemId ไม่ตรงกับ job/, 'a mismatched ground item must discard immediately');
+assert.match(source, /pickupWithoutObservedDrop[\s\S]{0,320}server ตอบ pickup FAIL/,
+  'an unseen drop gets one server-authoritative pickup fallback, then discards on FAIL');
 
 console.log('loot-queue-collector-flow regression: PASS');
