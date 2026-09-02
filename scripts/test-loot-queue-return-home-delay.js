@@ -17,9 +17,16 @@ assert.match(source, /lootQueueWarpCooldownMs: 0, \/\/ ดีเลย์ก่�
   'the existing editable warp delay must document both next-job and home-return use');
 assert.match(settledFlow, /const next = .*nextOpenJob\(job, now\);[\s\S]{0,500}if \(next && claim\(next\)\) \{[\s\S]{0,280}return;/,
   'a queued successor must be claimed before considering a return-home delay');
-assert.match(settledFlow, /activeJob\.returnHomeNotBefore = now \+ warpCooldownMs\(\);/,
+assert.match(settledFlow, /setActiveJobTimer\('returnHomeNotBefore', now \+ warpCooldownMs\(\), now\);/,
   'successful return-home delay must reuse the editable Loot Queue warp delay');
 assert.match(settledFlow, /if \(now < activeJob\.returnHomeNotBefore\) \{[\s\S]{0,260}return;[\s\S]{0,100}\}[^]*?returnHome\(\);/,
   'collector must wait before home only after finding no successor');
+
+const expiryStart = source.indexOf('if (now > job.expiresAt) {');
+const expiryEnd = source.indexOf('if (isDead)', expiryStart);
+assert(expiryStart >= 0 && expiryEnd > expiryStart, 'expired-job flow seam not found');
+const expiryFlow = source.slice(expiryStart, expiryEnd);
+assert.match(expiryFlow, /markDeferredVisibilityPass\(job\); send\(\{ type: 'nack', id: job\.id, claimToken: activeJob\.claimToken \}\); activeJob = null; idleReturnAt = now \+ warpCooldownMs\(\); return;/,
+  'an expired job with no successor must schedule the existing home-return delay');
 
 console.log('loot-queue-return-home-delay regression: PASS');

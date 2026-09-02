@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.1.9
+// @version      1.1.10
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -124,7 +124,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.1.9';
+  const VERSION = '1.1.10';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -144,7 +144,7 @@
     'wanderEnabled', 'warpFindEnabled', 'noMonsterWarpSec', 'warpToMonster', 'warpToMonsterMaxPerEntity', 'stuckWarpOnAbandon', 'warpToBoss',
     'restEnabled', 'restHpPercent', 'restUntilPercent', 'restMaxSec', 'postCombatDelayMs', 'autoRespawnEnabled', 'autoRespawnDelayMs', 'telegramAlertCard', 'telegramAlertFlee', 'telegramAlertBotMention', 'telegramAlertNearby', 'telegramAlertWhisper', 'telegramBotToken', 'telegramChatId',
     'sellEnabled', 'sellNpcName', 'sellNpcMap', 'sellNpcX', 'sellNpcY', 'sellIntervalMin', 'sellOnFull', 'sellItemIds',
-    'storageEnabled', 'kafraName', 'kafraMap', 'kafraMapX', 'kafraMapY', 'kafraChoice', 'depositOnFull', 'depositWeightPercent', 'depositAfterSell', 'storageDepositMode', 'depositItemIds', 'storageReserveItems',
+    'storageEnabled', 'kafraName', 'kafraMap', 'kafraMapX', 'kafraMapY', 'kafraChoice', 'depositOnFull', 'depositWeightPercent', 'depositAfterSell', 'storageTransferGapMs', 'storageDepositMode', 'depositItemIds', 'storageReserveItems',
     'oreRefineMap', 'oreRefineHubX', 'oreRefineHubY', 'oreRefineKafraName', 'oreRefineKafraX', 'oreRefineKafraY', 'oreRefineKafraChoice', 'oreRefineKafraNextCount', 'oreRefineNpcName', 'oreRefineNpcX', 'oreRefineNpcY', 'oreRefineTradeChoice', 'oreRefineTradeEntry', 'oreRefineSellChoice', 'oreRefineBatchSize', 'oreRefineSourceItemId', 'oreRefineResultItemId',
     'farmMap', 'farmMapX', 'farmMapY', 'warpBackToFarm',
     'abBuffEnabled', 'abBuffMap', 'abBuffX', 'abBuffY', 'abBuffCommandIntervalMs', 'abBuffReturnDelayMs', 'abBuffTimeoutSec',
@@ -314,9 +314,8 @@
     buffRebuffDelayMs: 5000,      // รออย่างน้อย N ms ก่อนใช้ buff ตัวเดิมซ้ำ (กัน spurious)
 
     // ---------- AUTO-SKILL (ใช้สกิลตามเงื่อนไข — mirror bot.js autoSkill) ----------
-    //  3 mode: targeted (Bash/Charge), AoE (Magnum Break), self-cast (Two-Hand Quicken)
-    //  แต่ละ skill: {name, skillId, level, targeted, selfCast, intervalMin, mobCountMin,
-    //                 maxUsesPerTarget, maxDistance, minDistance, spMin, cooldownMs}
+    //  mode: targeted/ground/AoE/self/ally และ support (บัพตัวเอง + ผู้เล่นตามชื่อ)
+    //  support ใช้ buffNames, buffIncludeSelf และค่า interval/cooldown เดิมของ Skill
     skillEnabled: true,          // ★ default ON
     skills: [{
     "name": "Steal",
@@ -443,6 +442,7 @@
     depositOnFull: true,          // ฝากเมื่อ server แจ้งเต็ม หรือ น้ำหนักถึง depositWeightPercent
     depositWeightPercent: 90,     // น้ำหนักถึง N% → เริ่มไปฝาก (0 = ปิด trigger น้ำหนัก)
     depositAfterSell: true,       // ★ chain: ฝากต่อทันทีหลังขายเสร็จ
+    storageTransferGapMs: 300,    // ระยะห่างส่งคำสั่งย้ายของ Kafra (ใช้ร่วมกันทั้งฝาก/ถอน)
     // all = default: ฝากทุกอย่างที่ไม่ใช่อุปกรณ์สวม/Weapon Set, selected = ใช้รายการด้านล่าง
     storageDepositMode: 'all',
     depositItemIds: [],           // ใช้เมื่อ storageDepositMode='selected'
@@ -520,7 +520,7 @@
     lootQueueClaimDelayMs: 5000, // รอก่อนออกจากจุดรอ/เมืองเพื่อรวม drop (0=ทันที)
     lootQueueActionTimeoutMs: 1000, // รอผลของ pickup แต่ละครั้งก่อน retry/ทิ้งงาน (ms)
     lootQueueWarpCooldownMs: 0, // ดีเลย์ก่อนวาร์ป job ถัดไปหรือกลับจุดรอ (0=ทันที); WARP_CONFIRM ยังกันคำสั่งซ้ำของ job เดิม
-    lootQueuePickupRetryCount: 2, // server ตอบ FAIL/เงียบหลังวาร์ป → retry เพิ่มหลังคำสั่งแรกกี่ครั้ง
+    lootQueuePickupRetryCount: 3, // จำนวนคำสั่ง pickup รวมทั้งหมด (อย่างน้อย 3: 2 รอบแรกก่อนเช็ค drop)
 
     // ---------- WARP-TO-LOOT (ฟีเจอร์รุนแรง — default OFF) ----------
     //  เมื่อเก็บของไม่ได้ครบ maxAttempts (server เงียบ = ติดกำแพง/หน้าผา)
@@ -631,7 +631,10 @@
       const parsed = JSON.parse(localStorage.getItem(PROFILES_STORAGE_KEY));
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
       let migrated = false;
-      for (const snapshot of Object.values(parsed)) migrated = normalizeStorageDepositMode(snapshot) || migrated;
+      for (const snapshot of Object.values(parsed)) {
+        migrated = normalizeStorageDepositMode(snapshot) || migrated;
+        migrated = normalizeLootQueuePickupAttemptLimit(snapshot) || migrated;
+      }
       if (migrated) localStorage.setItem(PROFILES_STORAGE_KEY, JSON.stringify(parsed));
       return parsed;
     } catch (_) { return {}; }
@@ -668,6 +671,7 @@
         if (Object.prototype.hasOwnProperty.call(snapshot, key)) clean[name][key] = cloneConfigValue(snapshot[key]);
       }
       normalizeStorageDepositMode(clean[name]);
+      normalizeLootQueuePickupAttemptLimit(clean[name]);
     }
     return clean;
   }
@@ -692,6 +696,19 @@
     config.storageDepositMode = Array.isArray(config.depositItemIds) && config.depositItemIds.length ? 'selected' : 'all';
     return true;
   }
+  // รุ่นก่อนใช้ค่านี้เป็นจำนวน retry ที่เพิ่มจากคำสั่งแรก. ปัจจุบันเป็น
+  // จำนวนคำสั่ง Pickup รวม เพื่อให้รอบสุดท้ายตรงกับเลขที่ตั้งใน UI.
+  function lootQueuePickupAttemptLimit(value) {
+    const count = Math.round(Number(value));
+    return Number.isFinite(count) ? Math.max(3, Math.min(6, count)) : 3;
+  }
+  function normalizeLootQueuePickupAttemptLimit(config) {
+    if (!config || typeof config !== 'object' || !Object.prototype.hasOwnProperty.call(config, 'lootQueuePickupRetryCount')) return false;
+    const normalized = lootQueuePickupAttemptLimit(config.lootQueuePickupRetryCount);
+    if (config.lootQueuePickupRetryCount === normalized) return false;
+    config.lootQueuePickupRetryCount = normalized;
+    return true;
+  }
   // Import เก่าบางรุ่นมี config ไม่ครบ แต่มีค่าเต็มอยู่ใน active profile.
   // profile เติมเฉพาะ key ที่หาย ส่วน config สดจากเครื่องต้นทางต้องมีสิทธิ์ทับเสมอ.
   function buildImportConfig(data, importedProfiles, requestedActive) {
@@ -709,6 +726,7 @@
     }
     migrateNoMonsterWarpDefault(data, merged);
     normalizeStorageDepositMode(merged);
+    normalizeLootQueuePickupAttemptLimit(merged);
     return merged;
   }
   function backupQueueSummary(data) {
@@ -731,7 +749,7 @@
 
   // ★ โหลดค่าที่บันทึกไว้จาก localStorage (ทับ default)
   loadConfig();
-  if (normalizeStorageDepositMode(CFG)) saveConfig();
+  if (normalizeStorageDepositMode(CFG) || normalizeLootQueuePickupAttemptLimit(CFG)) saveConfig();
   // Master Bot is a deep module: every autonomous loop only checks enabled(),
   // while release/reset behaviour is owned here through one pause handler.
   // Packet decoding and explicit manual buttons are deliberately outside it.
@@ -1397,6 +1415,16 @@
     hp.cur = cur;
     hp.max = m;
   }
+  // Support-mode Heal ใช้ค่า HP ของผู้เล่นที่ server ส่งมากับ STAT packet เดิม.
+  // เก็บเฉพาะ entity ที่ยืนยันว่าเป็น player แล้ว; ไม่ใช้ packet นี้ตั้ง playerId.
+  function applyObservedPlayerHp(id, cur, m) {
+    if (!(m > 0) || cur < 0 || cur > m) return;
+    if (id === playerId) { applyStat(id, cur, m); return; }
+    const entity = entities.get(id);
+    if (!entity || entity.kind !== 0) return;
+    entity.hp = cur;
+    entity.hpMax = m;
+  }
   const hpPct = () => (hp.cur != null && hp.max > 0) ? (hp.cur / hp.max) * 100 : null;
 
   // ============================================================
@@ -1965,7 +1993,6 @@
     const WARP_RETRY_AFTER_FAIL_MS = 500;
     const MAX_WARP_ATTEMPTS = 3;
     const SAME_MAP_WARP_SETTLE_MS = 1000;
-    const PICKUP_RETRY_INTERVAL_MS = 650;
     let lastWarpAt = 0;
     let activeJob = null; // { job, claimToken, pickupAt, lastActionAt, stage }
     let homeReturn = null; // { requestedAt, attempts, retryAt, fromMap } — รอ MAP_NAME/พิกัดยืนยันการกลับจุดรอ
@@ -1973,6 +2000,10 @@
     let idleReturnAt = 0;
     const pendingOffers = new Map();
     const availableJobs = new Map(); // งาน open ที่มาถึงระหว่าง collector กำลังเก็บชิ้นก่อนหน้า
+    // งานที่ยังพิสูจน์ไม่ได้ว่า drop หายจริง (เช่น ITEM_DROP/MAP_NAME มาช้า)
+    // จะถูกคืนคิวหนึ่งรอบก่อน เพื่อกัน claim → nack วนกับงานเดิมเมื่อไม่มี packet มาเลย.
+    const deferredVisibilityJobIds = new Set();
+    let deferredVisibilityPassReady = false;
     const clientId = 'assist-' + Math.random().toString(36).slice(2, 10);
     const role = () => ['farm', 'collector'].includes(CFG.lootQueueRole) ? CFG.lootQueueRole : 'off';
     const collectorGameReady = () => !!playerId && !!currentMap && !!activeWS && activeWS.readyState === WebSocket.OPEN;
@@ -1999,10 +2030,7 @@
       const delay = Number(CFG.lootQueueWarpCooldownMs);
       return Number.isFinite(delay) ? Math.max(0, Math.min(10000, Math.round(delay))) : 0;
     };
-    const pickupRetryCount = () => {
-      const count = Number(CFG.lootQueuePickupRetryCount);
-      return Number.isFinite(count) ? Math.max(0, Math.min(5, Math.round(count))) : 2;
-    };
+    const pickupAttemptLimit = () => lootQueuePickupAttemptLimit(CFG.lootQueuePickupRetryCount);
     const send = (message) => lootQueueTransport.send(message);
     const sendHello = () => send({ type: 'hello', role: role(), group: CFG.lootQueueGroup || 'default', clientId });
     const stage = (name, text) => {
@@ -2022,14 +2050,24 @@
     // Drain the queue before returning home. Prefer the current map (and then
     // its nearest drop) to reduce teleports; a different-map job is still a
     // valid immediate follow-up and the normal active-job flow will warp to it.
-    const nextOpenJob = (job, now) => [...availableJobs.values()]
-      .filter(next => next.id !== job.id && next.expiresAt > now)
-      .sort((a, b) => {
-        const aSameMap = a.map === job.map, bSameMap = b.map === job.map;
-        if (aSameMap !== bSameMap) return aSameMap ? -1 : 1;
-        if (aSameMap) return Math.hypot(a.x - job.x, a.y - job.y) - Math.hypot(b.x - job.x, b.y - job.y);
-        return (a.createdAt || 0) - (b.createdAt || 0);
-      })[0] || null;
+    const nextOpenJob = (job, now) => {
+      const openJobs = [...availableJobs.values()]
+        .filter(next => (!job || next.id !== job.id) && next.expiresAt > now)
+        .sort((a, b) => {
+          if (!job) return (a.createdAt || 0) - (b.createdAt || 0);
+          const aSameMap = a.map === job.map, bSameMap = b.map === job.map;
+          if (aSameMap !== bSameMap) return aSameMap ? -1 : 1;
+          if (aSameMap) return Math.hypot(a.x - job.x, a.y - job.y) - Math.hypot(b.x - job.x, b.y - job.y);
+          return (a.createdAt || 0) - (b.createdAt || 0);
+        });
+      // ก่อนมีงานอื่นจบ ห้ามรับงานที่เพิ่งคืนเพราะยังไม่เห็น packet กลับมาอีกครั้ง
+      if (!deferredVisibilityPassReady) return openJobs.find(next => !deferredVisibilityJobIds.has(next.id)) || null;
+      // งานอื่นเดินมาถึง terminal แล้ว: เปิดโอกาสให้ตรวจ job ที่ packet เคยมาช้าอีกหนึ่งรอบ
+      // และกลับไปใช้ลำดับเลือกงานเดิม เพื่อไม่สร้าง priority ใหม่ใน queue.
+      deferredVisibilityPassReady = false;
+      deferredVisibilityJobIds.clear();
+      return openJobs[0] || null;
+    };
     const offerPending = () => {
       const now = nowMs();
       for (const record of pendingOffers.values()) {
@@ -2043,7 +2081,10 @@
       if (message.type === 'available' && role() === 'collector') {
         for (const job of jobsFrom(message)) if (job && job.id) availableJobs.set(job.id, job);
         // AB Buff เริ่มรอ/ทำงานแล้ว: เก็บงานไว้ให้ server ถือ TTL แต่ไม่รับงานใหม่มาตัด flow AB
-        if (!activeJob && !claimPendingId && !isAbBuffPending() && !isAbBuffActive() && !shouldHoldLootQueueForStorage()) claim(jobsFrom(message)[0]);
+        if (!activeJob && !claimPendingId && !isAbBuffPending() && !isAbBuffActive() && !shouldHoldLootQueueForStorage()) {
+          const next = nextOpenJob(null, nowMs());
+          if (next) claim(next);
+        }
       } else if (message.type === 'claimed' && role() === 'collector') {
         const replacingSettledJob = activeJob && activeJob.settleUntil && claimPendingId === message.job.id;
         if (activeJob && !replacingSettledJob) {
@@ -2053,6 +2094,8 @@
         if (claimPendingId === message.job.id && claimPendingAt) lastClaimRttMs = nowMs() - claimPendingAt;
         claimPendingId = null; claimPendingAt = 0;
         availableJobs.delete(message.job.id);
+        // selector จะกันเฉพาะจน server ยืนยันว่าเราได้เริ่มตรวจรอบใหม่จริง ๆ
+        deferredVisibilityJobIds.delete(message.job.id);
         const claimedAt = nowMs();
         // อยู่แมปเดียวกับ drop แล้วไม่ต้องรอรวมงาน: ส่ง pickup รอบ tick ถัดไปทันที
         // ส่วนงานข้ามแมปยังรอตามค่า UI เพื่อให้ฟาร์มมีเวลาส่ง drop ใกล้กันเข้าคิว
@@ -2074,12 +2117,14 @@
           return;
         }
         log('⚠️ Loot Queue: งานไม่มีบน server แล้ว → ปล่อยเพื่อหา job คิวถัดไป');
+        markDeferredVisibilityPass(activeJob.job);
         activeJob = null; claimPendingId = null; claimPendingAt = 0; idleReturnAt = nowMs();
       } else if (message.type === 'unavailable') {
-        if (message.id) availableJobs.delete(message.id);
+        if (message.id) { availableJobs.delete(message.id); deferredVisibilityJobIds.delete(message.id); }
         claimPendingId = null; claimPendingAt = 0;
       } else if (message.type === 'expired') {
         availableJobs.delete(message.id);
+        deferredVisibilityJobIds.delete(message.id);
       }
     };
     const connect = () => {
@@ -2137,14 +2182,34 @@
       }
       return true;
     };
+    const markDeferredVisibilityPass = (job) => {
+      // job นี้ต้องเป็น "งานอื่น" จากงานที่กำลังพักรอ packet; ไม่เช่นนั้นจะวน claim เดิมทันที.
+      if (!job || !deferredVisibilityJobIds.size || deferredVisibilityJobIds.has(job.id)) return;
+      deferredVisibilityPassReady = true;
+    };
     const discardActive = (reason) => {
       if (!activeJob) return false;
       const stale = activeJob;
       send({ type: 'discard', id: stale.job.id, claimToken: stale.claimToken, reason });
       log('🚫 Loot Queue: ทิ้ง', stale.job.itemName, '—', reason);
+      markDeferredVisibilityPass(stale.job);
       activeJob = null;
       claimPendingId = null;
       // งานนี้จบแล้ว: claim งานถัดไปได้ทันที; ถ้าไม่มีจึงใช้ delay วาร์ปเดิมก่อนกลับจุดรอ.
+      idleReturnAt = nowMs() + warpCooldownMs();
+      return true;
+    };
+    // ไม่มี packet ไม่ใช่หลักฐานว่า drop หาย: คืน job แล้วให้ queue หมุนผ่านงานอื่นก่อน.
+    // ถ้าไม่มีงานอื่น nextOpenJob() จะไม่รับ job นี้ซ้ำและ flow ปกติจะกลับจุดรอ.
+    const deferActiveForVisibility = (reason) => {
+      if (!activeJob) return false;
+      const stale = activeJob;
+      deferredVisibilityJobIds.add(stale.job.id);
+      deferredVisibilityPassReady = false;
+      send({ type: 'nack', id: stale.job.id, claimToken: stale.claimToken, reason });
+      log('📮 Loot Queue: คืนงานรอข้อมูล packet', stale.job.itemName, '—', reason);
+      activeJob = null;
+      claimPendingId = null;
       idleReturnAt = nowMs() + warpCooldownMs();
       return true;
     };
@@ -2163,6 +2228,40 @@
       send({ type: 'nack', id: stale.job.id, claimToken: stale.claimToken });
       log('🏦 Loot Queue: กระเป๋าเต็ม → ปล่อยงานกลับคิวก่อนฝาก', stale.job.itemName);
       return true;
+    };
+    const setActiveJobTimer = (key, dueAt, setAt = nowMs()) => {
+      if (!activeJob) return dueAt;
+      activeJob[key] = dueAt;
+      const deadlineSetAt = activeJob.skillTimerDeadlineSetAt || (activeJob.skillTimerDeadlineSetAt = {});
+      deadlineSetAt[key] = setAt;
+      return dueAt;
+    };
+    // คิว Skill ใช้เวลาจาก global gap / คิว Manual ที่มีอยู่แล้ว.  ระหว่างนั้นให้
+    // หยุดเฉพาะ deadline ภายใน Collector เพื่อไม่ให้ timeout/retry นับทับการใช้ Skill.
+    // Lease, TTL และการยืนยันการวาร์ปเป็นเวลาฝั่ง server จึงห้ามเลื่อนตาม.
+    const pauseActiveJobTimersForSkill = (now) => {
+      if (!activeJob) return false;
+      if (isSkillQueueHoldingLootQueue()) {
+        if (!activeJob.skillTimerPausedAt) {
+          activeJob.skillTimerPausedAt = now;
+          stage('skill-priority', 'พัก timer Loot Queue ให้ Skill ทำงานก่อน');
+        }
+        return true;
+      }
+      const pausedAt = activeJob.skillTimerPausedAt || 0;
+      if (!pausedAt) return false;
+      activeJob.skillTimerPausedAt = 0;
+      const pausedMs = Math.max(0, now - pausedAt);
+      if (!pausedMs) return false;
+      const deadlineSetAt = activeJob.skillTimerDeadlineSetAt || {};
+      for (const key of ['claimDelayUntil', 'collectorPostWarpSettleUntil', 'pickupResponseDueAt', 'nextPickupAt', 'returnHomeNotBefore', 'warpRetryAt']) {
+        const dueAt = Number(activeJob[key]) || 0;
+        if (dueAt <= 0) continue;
+        const pausedFrom = Math.max(pausedAt, Number(deadlineSetAt[key]) || 0);
+        activeJob[key] = dueAt + Math.max(0, now - pausedFrom);
+      }
+      log('📮 Loot Queue: เดิน timer ต่อหลัง Skill', pausedMs + 'ms');
+      return false;
     };
     return {
       isSpecial: special,
@@ -2193,6 +2292,7 @@
         const done = activeJob;
         send({ type: 'ack', id: done.job.id, claimToken: done.claimToken });
         // Happy path ต้องมองงานถัดไปทันที เพื่อใช้ nextOpenJob() เลือกแมป/ระยะที่เหมาะที่สุด.
+        markDeferredVisibilityPass(done.job);
         done.settleUntil = nowMs();
         log('📮 Loot Queue: เก็บสำเร็จ → มอง job คิวถัดไปทันที', done.job.itemName);
         return done.job;
@@ -2204,19 +2304,15 @@
         const now = nowMs();
         activeJob.waitingPickupResult = false;
         const attempts = activeJob.pickupAttempts || 0;
-        const limit = pickupRetryCount();
+        const limit = pickupAttemptLimit();
         activeJob.lastActionAt = now; // server ตอบแล้ว จึงไม่ใช่ timeout แบบไม่มี action
-        if (activeJob.pickupWithoutObservedDrop) {
-          discardActive('ไม่พบ drop packet และ server ตอบ pickup FAIL หลังตรวจสอบ 1 ครั้ง');
+        if (attempts >= limit) {
+          discardActive('server ตอบ pickup FAIL ครบ ' + limit + ' รอบ');
           return true;
         }
-        if (attempts >= 1 + limit) {
-          discardActive('server ตอบ pickup FAIL ครบ ' + limit + ' retry');
-          return true;
-        }
-        activeJob.nextPickupAt = now + PICKUP_RETRY_INTERVAL_MS;
-        stage('pickup-fail', 'server ตอบ pickup FAIL → retry ' + attempts + '/' + limit);
-        log('⚠️ Loot Queue: server ตอบ pickup FAIL', activeJob.job.itemName, '→ retry ' + attempts + '/' + limit + ' ใน ' + PICKUP_RETRY_INTERVAL_MS + 'ms');
+        setActiveJobTimer('nextPickupAt', now, now);
+        stage('pickup-fail', 'server ตอบ pickup FAIL → retry ' + (attempts + 1) + '/' + limit);
+        log('⚠️ Loot Queue: server ตอบ pickup FAIL', activeJob.job.itemName, '→ retry ' + (attempts + 1) + '/' + limit);
         return true;
       },
       onPickupTakenByOther(dropId) {
@@ -2246,7 +2342,7 @@
         activeJob.forceRandomWarp = true;
         activeJob.crossMapExactTarget = false;
         activeJob.warpRequestedAt = 0;
-        activeJob.warpRetryAt = nowMs() + WARP_RETRY_AFTER_FAIL_MS;
+        setActiveJobTimer('warpRetryAt', nowMs() + WARP_RETRY_AFTER_FAIL_MS);
         stage('warp-invalid:' + activeJob.job.map, 'พิกัด drop วาร์ปไม่ได้ → re-check แล้วใช้จุดเดินได้ในแมป');
         return true;
       },
@@ -2266,7 +2362,7 @@
       pause() {
         if (activeJob && !activeJob.settleUntil) send({ type: 'nack', id: activeJob.job.id, claimToken: activeJob.claimToken });
         activeJob = null; homeReturn = null; claimPendingId = null; claimPendingAt = 0; idleReturnAt = 0;
-        pendingOffers.clear(); availableJobs.clear();
+        pendingOffers.clear(); availableJobs.clear(); deferredVisibilityJobIds.clear(); deferredVisibilityPassReady = false;
         lootQueueTransport.close();
       },
       resume() { connect(); },
@@ -2289,7 +2385,7 @@
             return;
           }
           if (homeReturn) {
-            const nextWhileReturning = [...availableJobs.values()].filter(job => job.expiresAt > nowMs()).sort((a, b) => a.createdAt - b.createdAt)[0];
+            const nextWhileReturning = nextOpenJob(null, nowMs());
             if (nextWhileReturning) {
               homeReturn = null;
               log('📮 Loot Queue: มีงานใหม่ระหว่างกลับจุดรอ → ยกเลิกการกลับและรับงาน', nextWhileReturning.itemName);
@@ -2298,7 +2394,6 @@
             tickHomeReturn(nowMs());
             return;
           }
-          const next = [...availableJobs.values()].filter(job => job.expiresAt > nowMs()).sort((a, b) => a.createdAt - b.createdAt)[0];
           if (claimPendingId) {
             if (nowMs() - claimPendingAt < claimResponseTimeoutMs()) return;
             log('⚠️ Loot Queue: รอ claimed จาก ' + lootQueueTransportLabel() + ' เกิน ' + (claimResponseTimeoutMs() / 1000) + 's → รอ server ปล่อยงานใหม่');
@@ -2306,6 +2401,7 @@
             claimPendingId = null; claimPendingAt = 0;
             return;
           }
+          const next = nextOpenJob(null, nowMs());
           if (next && claim(next)) return;
           if (!idleReturnAt || nowMs() < idleReturnAt) return;
           idleReturnAt = 0;
@@ -2316,13 +2412,14 @@
           return;
         }
         const job = activeJob.job, now = nowMs();
-        if (now > job.expiresAt) { log('⌛ Loot Queue: งานหมดอายุก่อนเก็บ', job.itemName); send({ type: 'nack', id: job.id, claimToken: activeJob.claimToken }); activeJob = null; return; }
+        if (now > job.expiresAt) { log('⌛ Loot Queue: งานหมดอายุก่อนเก็บ', job.itemName); markDeferredVisibilityPass(job); send({ type: 'nack', id: job.id, claimToken: activeJob.claimToken }); activeJob = null; idleReturnAt = now + warpCooldownMs(); return; }
         if (isDead) { stage('dead', 'ตายอยู่ — พักงานจนกว่าจะ respawn'); return; }
         // pickup() ACKs and deletes this job at the local queue. Never renew
         // it while settling or while its successor claim is in flight.
         if (!activeJob.settleUntil && !claimPendingId && (!activeJob.renewAt || now - activeJob.renewAt > 8000)) {
           if (send({ type: 'renew', id: job.id, claimToken: activeJob.claimToken })) activeJob.renewAt = now;
         }
+        if (pauseActiveJobTimersForSkill(now)) return;
         // รับงานแรกแล้วพักสั้น ๆ เพื่อรวม drop ที่ฟาร์มเพิ่งฆ่าต่อเนื่อง ก่อนวาร์ปออกจากเมือง
         if (now < activeJob.claimDelayUntil) {
           activeJob.stage = 'claim-delay';
@@ -2333,6 +2430,7 @@
           // AB Buff ที่อยู่ PENDING_IDLE ต้องได้เริ่มหลังงานปัจจุบันจบจริง
           // จึงห้าม Queue chain งานต่อเนื่อง เช่นเดียวกับกรณีต้องไปฝากของ
           const holdForAbBuff = isAbBuffPending();
+          if (claimPendingId) return;
           const next = (holdForAbBuff || shouldHoldLootQueueForStorage()) ? null : nextOpenJob(job, now);
           if (next && claim(next)) {
             activeJob.stage = next.map === job.map ? 'claim-same-map' : 'claim-next-map';
@@ -2344,7 +2442,7 @@
           if (holdForAbBuff) log('📮 Loot Queue: งานปัจจุบันจบแล้ว → ไม่ต่อคิว เพราะ AB Buff รออยู่');
           // ไม่มีงานต่อแล้วจึงใช้ delay วาร์ปของ Loot Queue เดิมก่อนกลับจุดรอ.
           // หาก job ใหม่เข้ามาระหว่างรอ nextOpenJob() ด้านบนจะ claim ก่อนเสมอ.
-          if (!activeJob.returnHomeNotBefore) activeJob.returnHomeNotBefore = now + warpCooldownMs();
+          if (!activeJob.returnHomeNotBefore) setActiveJobTimer('returnHomeNotBefore', now + warpCooldownMs(), now);
           if (now < activeJob.returnHomeNotBefore) {
             stage('return-home-delay', 'ไม่มี job ถัดไป → รอ ' + Math.max(0, activeJob.returnHomeNotBefore - now) + 'ms ก่อนกลับจุดรอ');
             return;
@@ -2357,7 +2455,7 @@
           // หลังส่งวาร์ปต้องรอ MAP_NAME ยืนยันก่อน; ห้ามยิงพิกัดเดิมซ้ำรัว ๆ เมื่อ server ปฏิเสธ
           if (activeJob.warpRequestedAt && now - activeJob.warpRequestedAt < WARP_CONFIRM_MS) return;
           if (activeJob.warpAttempts >= MAX_WARP_ATTEMPTS) {
-            discardActive('ยืนยันการวาร์ปไป ' + job.map + ' ไม่สำเร็จหลังลอง ' + MAX_WARP_ATTEMPTS + ' ครั้ง');
+            deferActiveForVisibility('ยืนยันการวาร์ปไป ' + job.map + ' ไม่สำเร็จหลังลอง ' + MAX_WARP_ATTEMPTS + ' ครั้ง');
             return;
           }
           const useRandomSpawn = activeJob.forceRandomWarp || activeJob.warpAttempts > 0;
@@ -2369,7 +2467,7 @@
             if (sendTeleport(job.map, warpX, warpY, 'loot-queue-job')) {
               activeJob.warpAttempts++;
               activeJob.warpRequestedAt = now;
-              activeJob.warpRetryAt = 0;
+              setActiveJobTimer('warpRetryAt', 0, now);
               activeJob.forceRandomWarp = false;
               activeJob.crossMapExactTarget = !useRandomSpawn;
               activeJob.warpPositionAt = lastPlayerPositionPacketAt;
@@ -2408,7 +2506,7 @@
           const movedAfterWarp = lastPlayerPositionPacketAt > (activeJob.intraMapWarpPositionAt || 0);
           if (!movedAfterWarp && now - activeJob.intraMapWarpRequestedAt < SAME_MAP_WARP_SETTLE_MS) return;
           activeJob.intraMapWarpRequestedAt = 0;
-          if (activeJob.warpPresenceCheckPending) activeJob.collectorPostWarpSettleUntil = now + collectorPostWarpSettleMs();
+          if (activeJob.warpPresenceCheckPending) setActiveJobTimer('collectorPostWarpSettleUntil', now + collectorPostWarpSettleMs(), now);
           stage('map-ready', movedAfterWarp ? 'วาร์ปในแมปแล้ว → ส่ง pickup' : 'ยังไม่เห็นพิกัดหลังวาร์ป → ส่ง pickup ตามปกติ');
         }
         // Server มี pathing ของ ground item อยู่แล้ว: pickup จะสั่งให้ server เดินหา item จริง
@@ -2416,7 +2514,7 @@
         if (!activeJob.mapReachedAt) {
           activeJob.mapReachedAt = now;
           activeJob.mapReachedPositionAt = activeJob.warpPositionAt || lastPlayerPositionPacketAt;
-          if (activeJob.warpPresenceCheckPending) activeJob.collectorPostWarpSettleUntil = now + collectorPostWarpSettleMs();
+          if (activeJob.warpPresenceCheckPending) setActiveJobTimer('collectorPostWarpSettleUntil', now + collectorPostWarpSettleMs(), now);
           stage('map-ready', 'ถึงแมปแล้ว → ให้ server เดินหา ' + job.itemName);
         }
         if (!activeJob.pickupAt && now < (activeJob.collectorPostWarpSettleUntil || 0)) {
@@ -2424,33 +2522,38 @@
           stage('collector-post-warp-settle', 'รอข้อมูลหลังวาร์ป ' + remainingMs + 'ms ก่อนตรวจ drop/pickup');
           return;
         }
-        // ผ่านช่วงรอข้อมูลหลังวาร์ปของ Collector แล้วจึงเช็ค ground item ที่ client เห็นจริง.
-        // ไม่เห็น packet drop ยังไม่ใช่หลักฐานว่าของหาย: ให้ server ยืนยันเพียง
-        // 1 ครั้ง แล้ว discard ทันทีเมื่อ FAIL/เงียบ แทนการ retry ทั้งชุด.
+        // ผ่านช่วงรอข้อมูลหลังวาร์ปแล้ว ลอง Pickup สองรอบแรกก่อนเสมอ.
+        // Client อาจยังโหลด entity ไม่ครบ จึงเลื่อนการเช็ค ground drop ไปก่อนรอบ 3.
         if (!activeJob.pickupAt && activeJob.warpPresenceCheckPending) {
           activeJob.warpPresenceCheckPending = false;
-          const observedDrop = recentDrops.get(job.dropId);
-          if (observedDrop && Number(observedDrop.itemId) !== Number(job.itemId)) {
-            discardActive('dropId เจอแต่ itemId ไม่ตรงกับ job');
-            return;
-          }
-          activeJob.pickupWithoutObservedDrop = !observedDrop;
-          if (observedDrop) {
-            stage('drop-present', 'พบ drop บนพื้น → ส่ง pickup ' + job.itemName);
-          } else {
-            stage('drop-unseen', 'ยังไม่พบ packet drop → ให้ server ตรวจ pickup 1 ครั้ง');
-          }
+          stage('pickup-first-two', 'รอข้อมูลหลังวาร์ปครบแล้ว → ลอง pickup 2 รอบก่อนเช็ค drop');
         }
         const sendPickupAttempt = (label) => {
+          const attempt = (activeJob.pickupAttempts || 0) + 1;
+          const limit = pickupAttemptLimit();
+          // ก่อน Pickup รอบ 3 เป็นต้นไป ตรวจข้อมูล ground item ล่าสุดอีกครั้ง.
+          // หากหายหรือ itemId ไม่ตรง ให้ทิ้งงานก่อนส่ง packet รอบถัดไป.
+          if (attempt >= 3) {
+            const observedDrop = recentDrops.get(job.dropId);
+            if (!observedDrop) {
+              deferActiveForVisibility('ไม่พบ drop บนพื้นก่อน pickup รอบ ' + attempt);
+              return false;
+            }
+            if (Number(observedDrop.itemId) !== Number(job.itemId)) {
+              discardActive('dropId เจอแต่ itemId ไม่ตรงกับ job ก่อน pickup รอบ ' + attempt);
+              return false;
+            }
+            stage('drop-present-retry', 'พบ drop บนพื้นก่อน pickup รอบ ' + attempt);
+          }
           if (!sendPickup(job.dropId)) return false;
           activeJob.pickupAt = activeJob.pickupAt || now;
-          activeJob.pickupAttempts = (activeJob.pickupAttempts || 0) + 1;
+          activeJob.pickupAttempts = attempt;
           activeJob.waitingPickupResult = true;
-          activeJob.pickupResponseDueAt = now + pickupResponseWaitMs();
+          setActiveJobTimer('pickupResponseDueAt', now + pickupResponseWaitMs(), now);
           activeJob.lastActionAt = now;
           activeJob.positionPacketAt = lastPlayerPositionPacketAt;
-          activeJob.nextPickupAt = 0;
-          log('📮 Loot Queue: ' + label, job.itemName, '(' + activeJob.pickupAttempts + '/' + (1 + pickupRetryCount()) + ')');
+          setActiveJobTimer('nextPickupAt', 0, now);
+          log('📮 Loot Queue: ' + label, job.itemName, '(' + activeJob.pickupAttempts + '/' + limit + ')');
           return true;
         };
         if (!activeJob.pickupAt) {
@@ -2461,21 +2564,17 @@
         if (lastPlayerPositionPacketAt > activeJob.positionPacketAt) {
           activeJob.positionPacketAt = lastPlayerPositionPacketAt;
           activeJob.lastActionAt = now;
-          if (activeJob.waitingPickupResult) activeJob.pickupResponseDueAt = now + pickupResponseWaitMs();
+          if (activeJob.waitingPickupResult) setActiveJobTimer('pickupResponseDueAt', now + pickupResponseWaitMs(), now);
           return;
         }
         if (activeJob.waitingPickupResult) {
           if (now < activeJob.pickupResponseDueAt) return;
           activeJob.waitingPickupResult = false;
-          if (activeJob.pickupWithoutObservedDrop) {
-            discardActive('ไม่พบ drop packet และ server เงียบหลัง pickup ตรวจสอบ 1 ครั้ง');
+          if ((activeJob.pickupAttempts || 0) >= pickupAttemptLimit()) {
+            discardActive('server เงียบหลัง pickup ครบ ' + pickupAttemptLimit() + ' รอบ');
             return;
           }
-          if ((activeJob.pickupAttempts || 0) >= 1 + pickupRetryCount()) {
-            discardActive('server เงียบหลัง pickup ครบ ' + pickupRetryCount() + ' retry');
-            return;
-          }
-          activeJob.nextPickupAt = now + PICKUP_RETRY_INTERVAL_MS;
+          setActiveJobTimer('nextPickupAt', now, now);
           stage('pickup-timeout', 'รอผล pickup ไม่ทัน → retry แบบไม่ซ้อนคำสั่ง');
           return;
         }
@@ -2765,7 +2864,12 @@
     const now = nowMs();
     if (op === 0x3d) {
       target.cloakingActiveAt = now;
+      target.cloakingEvidenceAt = now;
       target.cloakingRemovedAt = 0;
+      const cloakingTarget = entities.get(target.id) || target;
+      // 0x3d เป็นสถานะ Cloaking ของ target โดยตรง จึงใช้เป็น fallback ได้เมื่อ
+      // self-cast 0x1d ไม่มาถึง client นี้ แล้วให้ Sight ลองทันทีใน command lane เดิม.
+      if (beginHiddenWait(cloakingTarget, 'Cloaking', now)) tryRevealHiddenTargetWithSight(cloakingTarget, now);
       return;
     }
     if (op === 0x3e) {
@@ -3017,7 +3121,7 @@
     if (op === 0x25 && u.length >= 18) {
       const id = u32(u, 1);
       const cur = u32(u, 9), m = u32(u, 13);
-      applyStat(id, cur, m);
+      applyObservedPlayerHp(id, cur, m);
     }
     // 0x27 SP_UPDATE: SP ปัจจุบัน + max ของ player (regen ทุก 6s)
     //   ★ mirror world.js:468-477 — STAT (0x25) ส่งแค่ HP ไม่มี SP → SP ต้องอ่านจาก 0x27 เท่านั้น
@@ -3162,6 +3266,7 @@
       // ★ ล้างเวลา skill + per-target uses (mirror bot.js:744-747)
       if (lastSkillUse.size > 0) { lastSkillUse.clear(); saveSkillTimesDebounced(); }
       skillUsesOnTarget.clear();
+      supportTargetUse.clear();
       selfSupportEffects.clear();
       selfSupportPendingUntil.clear();
       resetAutoSupportQueue();
@@ -3862,16 +3967,20 @@
         if (selfCast && skillId === CLOAKING_SKILL_ID) {
           const cloakingAt = nowMs();
           target.cloakingCastAt = cloakingAt;
+          target.cloakingEvidenceAt = cloakingAt;
           target.cloakingRemovedAt = 0;
           const cloakingTarget = entities.get(srcId) || target;
           log('🫥', (cloakingTarget.name || target.name || srcId.toString(16)), 'ใช้ Cloaking → เข้าโหมดรอเลิก Cloaking');
           // 0x1b ไม่ได้มาทุกรอบ จึงใช้ self-cast Cloaking ที่ยืนยันแล้วเป็นจุดเริ่ม HIDDEN_WAIT
-          beginHiddenWait(cloakingTarget, 'Cloaking', cloakingAt);
+          if (beginHiddenWait(cloakingTarget, 'Cloaking', cloakingAt)) tryRevealHiddenTargetWithSight(cloakingTarget, cloakingAt);
         }
       }
       if (u.length >= 16) {
         const skillTargetId = u32(u, 10);
         const skillId = u[14];
+        // Targeted Skill echo is emitted only after the server has executed
+        // the action.  Support uses it as its authoritative success signal.
+        if (srcId === playerId) confirmPendingSupportSkillByPacket(skillId, skillTargetId, nowMs());
         if (skillId === 61 && srcId === playerId && target && skillTargetId === target.id) {
           confirmStealSuccessBySkill();
         }
@@ -4810,6 +4919,10 @@
     return true;
   }
   function storageDepositMode() { return CFG.storageDepositMode === 'selected' ? 'selected' : 'all'; }
+  function normalizeStorageTransferGapMs(value) {
+    return Math.max(50, Math.min(5000, Math.round(Number(value) || 300)));
+  }
+  function storageTransferGapMs() { return normalizeStorageTransferGapMs(CFG.storageTransferGapMs); }
   function storageDepositItemIds() {
     if (storageDepositMode() === 'selected') return [...new Set(Array.isArray(CFG.depositItemIds) ? CFG.depositItemIds : [])];
     return [...inventory.keys()];
@@ -4905,7 +5018,12 @@
     }
     return queue;
   }
-  const storageLoop = setInterval(() => {
+  function storageLoopDelayMs() {
+    return storageState === 'MOVE_ITEMS' || storageState === 'WITHDRAW_ITEMS'
+      ? storageTransferGapMs()
+      : 1000;
+  }
+  function storageLoopTick() {
     if (!masterBot.enabled()) return;
     if (!CFG.storageEnabled) return;
     if (isAbBuffActive()) return;
@@ -5019,8 +5137,7 @@
       return;
     }
     if (storageState === 'MOVE_ITEMS') {
-      // ★ ส่งของทีละชิ้น (รอ 800ms ระหว่างชิ้น กัน server บล็อก)
-      if (now - storageLastMoveAt < 800) return;
+      // ส่งทีละรายการตามค่าเดียวที่ผู้ใช้ตั้งไว้ใน Storage transfer gap.
       if (storageMoveIdx >= storageMoveQueue.length) {
         // ฝากครบแล้ว → ตรวจจำนวนสำรองที่จะหยิบกลับ
         log('🏦 ฝากครบแล้ว → ตรวจไอเท็มสำรอง');
@@ -5067,7 +5184,6 @@
         storageMoveIdx = 0;
         if (storageMoveQueue.length > 0) log('🏦 หยิบไอเท็มสำรอง', storageMoveQueue.map(i => nameOf(i.itemId) + ' ×' + i.amount).join(', '));
       }
-      if (now - storageLastMoveAt < 800) return;
       if (storageMoveIdx >= storageMoveQueue.length) {
         log('🏦 Storage ครบแล้ว → ปิด storage');
         sendStorageClose();
@@ -5111,7 +5227,13 @@
       }
       return;
     }
-  }, 1000);
+  }
+  function scheduleStorageLoop() {
+    setTimeout(() => {
+      storageLoopTick();
+      scheduleStorageLoop();
+    }, storageLoopDelayMs());
+  }
 
   // ============================================================
   //  ORE REFINE + SELL — manual state machine, no MOVE commands
@@ -5514,6 +5636,8 @@
   let storageRetryAt = 0;         // backoff หลัง abort กัน loop น้ำหนักเต็ม
   const storageRegularItems = new Map(); // itemId -> count จาก 0x54 (เฉพาะ stackable)
   let storageSnapshotAt = 0;      // เวลาที่ได้รับ 0x54 ล่าสุด
+  // Start only after every Storage state variable has been initialized.
+  scheduleStorageLoop();
 
   // ---------- ORE REFINE + SELL (independent manual workflow) ----------
   // Owns only its dialog/warp sequence.  It deliberately never issues MOVE.
@@ -5534,7 +5658,6 @@
   let fleePlayerDeferredForLoot = false; // เจอผู้เล่นระหว่างยังมี pickup queue → เก็บให้จบก่อนค่อยวาร์ป
   let fleePlayerDetectedAt = 0;          // Date.now(): เริ่มนับ delay ก่อนวาร์ปจากผู้เล่น
   let lastWarpFindAt = 0;        // throttle warpFind กัน spam
-  let lastTargetSwitchAt = 0;    // throttle การสลับ target (กันสลับบ่อย)
 
   // ---------- combat target state ----------
   let target = null;             // {id, x, y, acquiredAt, engageAt, attackProbeAt, lastAttackSignalAt, ...}
@@ -6046,7 +6169,25 @@
   let lastSkillPacketAt = 0, lastSkillPacketId = null; // global cast lane — ต่างจาก cooldown ที่เป็นราย skill
   let manualSkillQueue = [];
   let manualSkillQueueTimer = null;
-  let autoSupportQueue = [];      // snapshot คิว self/ally เพื่อไม่ scan แล้วสลับลำดับทุก tick
+  // งาน Self/Ally และ Support ผู้เล่นอื่นใช้คิวเดียวกัน เพื่อให้ลำดับจาก
+  // Skill list และ global skill lane เป็นแหล่งจริงเดียว ไม่เกิด packet แทรกจาก loop อื่น.
+  let autoSupportQueue = [];      // [{ skill, kind, targetId, targetName }]
+  function isCollectorSafeManualSkill(skill) {
+    return !!skill && (skill.selfCast || skill.ally);
+  }
+  function skipUnsafeManualSkillsDuringCollector() {
+    if (!lootQueue.isCollectorBusy()) return 0;
+    const skipped = manualSkillQueue.filter(job => !isCollectorSafeManualSkill(job.skill));
+    if (!skipped.length) return 0;
+    manualSkillQueue = manualSkillQueue.filter(job => isCollectorSafeManualSkill(job.skill));
+    for (const job of skipped) log('⛔ ข้าม', job.skill.name || ('skill_' + job.skill.skillId), ': Collector กำลังเก็บของ — อนุญาตเฉพาะ self/ally');
+    return skipped.length;
+  }
+  // เป็นเพียงสถานะของคิว Skill เดิม ไม่สร้าง cooldown/เวลาใหม่. Loot Queue ใช้
+  // สถานะนี้พัก deadline ในงานระหว่างที่ต้องรอ skill gap หรือรายการถัดไปในคิว.
+  function isSkillQueueHoldingLootQueue() {
+    return manualSkillQueue.some(job => isCollectorSafeManualSkill(job.skill)) || autoSupportQueue.length > 0;
+  }
   function skillCommandGapMs() {
     return Math.max(250, Number(CFG.skillCommandGapMs) || 1500);
   }
@@ -6119,8 +6260,8 @@
   }
 
   // Manual “use skills now” is intentionally a queue, never a burst.  It
-  // bypasses the per-skill timing rules by user request, but shares the same
-  // global cast lane as Auto-Skill so the two flows cannot collide.
+  // bypasses per-skill timing by user request, but waits for an already active
+  // Support Skill Set so an explicit click cannot split one recipient’s batch.
   function queueSkillsNow() {
     if (!CFG.skills.length) { log('⚠️ ยังไม่ได้ตั้ง skills'); return; }
     if (!activeWS || activeWS.readyState !== 1) { log('⚠️ ใช้ skill ไม่ได้: ยังไม่ได้ต่อ WebSocket'); return; }
@@ -6128,6 +6269,12 @@
     const jobs = [];
     for (const skill of CFG.skills) {
       if (!skill || skill.skillId == null) continue;
+      // Support ผู้เล่นอื่นต้อง resolve รายชื่อ/HP ตอน Auto queue จึงไม่สามารถ
+      // ใช้ปุ่ม manual แบบไม่มีเป้าหมายได้ (กันส่งเป็น AoE โดยไม่ตั้งใจ).
+      if (skill.buffMode) {
+        log('⚠️ ข้าม', skill.name || ('skill_' + skill.skillId), ': เป็นโหมดบัพผู้เล่นอื่น → รอ Auto Skill queue');
+        continue;
+      }
       if (skill.ally && playerId == null) {
         log('⚠️ ข้าม', skill.name || ('skill_' + skill.skillId), ': ยังไม่รู้ player_id');
         continue;
@@ -6153,18 +6300,20 @@
     }
     manualSkillQueue = jobs; // a second click replaces the old manual request, never doubles it
     if (manualSkillQueueTimer) { clearTimeout(manualSkillQueueTimer); manualSkillQueueTimer = null; }
+    skipUnsafeManualSkillsDuringCollector();
     if (!manualSkillQueue.length) return;
     log('✨ เข้าคิวใช้ skill', manualSkillQueue.length, 'รายการ · เว้น', (skillCommandGapMs() / 1000).toFixed(1) + 's');
+    if (autoSupportQueue.length) {
+      log('✨ Manual Skill: รอ Support Skill Set ปัจจุบันจบก่อน');
+      return;
+    }
     drainManualSkillQueue();
   }
 
   function drainManualSkillQueue() {
     manualSkillQueueTimer = null;
+    skipUnsafeManualSkillsDuringCollector();
     if (!manualSkillQueue.length) return;
-    // Collector owns the command lane until its current job has finished.
-    // Keep an explicit “use skill now” request queued instead of letting it
-    // interrupt pickup/retry and make the loot result time out.
-    if (lootQueue.isCollectorBusy()) return;
     if (!activeWS || activeWS.readyState !== 1) {
       log('⚠️ ยกเลิกคิว skill: WebSocket หลุด');
       manualSkillQueue = [];
@@ -6192,10 +6341,235 @@
     }
   }
 
-  // Self/ally support skills must not depend on Combat being ON.  Unlike the
-  // old scanner, this creates a snapshot of every eligible support skill and
-  // drains it in list order.  A short cooldown on Heal can therefore never
-  // jump ahead of Blessing → Agility → Kyrie midway through a buff round.
+  // เก็บเวลาใช้ต่อ "สกิล + เป้าหมาย" สำหรับ Support ผู้เล่นอื่นเท่านั้น.
+  // ไม่ persist เพราะหลัง refresh ต้องยืนยัน entity/ชื่อจาก packet ใหม่ก่อนเสมอ.
+  const supportTargetUse = new Map(); // skillId -> Map<playerId, timestamp>
+  // ชื่อที่ server ยังไม่ยืนยันการบัพจะพักไว้ชั่วคราว เพื่อปล่อย Skill Set
+  // ของชื่อถัดไปทำงานได้ โดยใช้ cooldown ของ Skill นั้นเป็นแหล่งเวลาจริงเดียว.
+  const supportRecipientRetryUntil = new Map(); // recipient key -> timestamp
+  const supportRepeatMs = (skill) => {
+    const intervalMin = Number(skill && skill.intervalMin) || 0;
+    if (intervalMin > 0) return intervalMin * 60 * 1000;
+    return Math.max(0, Number(skill && skill.cooldownMs) || 0);
+  };
+  function supportConfirmationWaitMs(skill) {
+    return Math.max(0, Number(skill && skill.cooldownMs) || 0);
+  }
+  function supportRecipientKey(recipient) {
+    if (!recipient || recipient.kind === 'self') return 'self';
+    return 'other:' + normalizedPlayerName(recipient.name);
+  }
+  function supportJobRecipientKey(job) {
+    if (!job || job.kind === 'self' || job.kind === 'buff-self') return 'self';
+    return 'other:' + normalizedPlayerName(job.targetName);
+  }
+  function isSupportRecipientDeferred(recipient, now) {
+    const key = supportRecipientKey(recipient);
+    const until = supportRecipientRetryUntil.get(key) || 0;
+    if (until <= now) {
+      if (until) supportRecipientRetryUntil.delete(key);
+      return false;
+    }
+    return true;
+  }
+  function deferSupportRecipient(job, now) {
+    const waitMs = supportConfirmationWaitMs(job && job.skill);
+    if (waitMs > 0) supportRecipientRetryUntil.set(supportJobRecipientKey(job), now + waitMs);
+  }
+  function dropSupportRecipientJobSet(job) {
+    const key = supportJobRecipientKey(job);
+    autoSupportQueue = autoSupportQueue.filter(queued => supportJobRecipientKey(queued) !== key);
+  }
+  // Support queue ต้องเรียงทุก packet แม้เป็น Skill เดียวกัน/คนละผู้เล่น.
+  // ใช้ Global Skill Gap ที่ผู้ใช้ตั้งไว้เป็น lane เดียว ไม่ใช้ cooldown ของ
+  // คนก่อนมาบล็อกคนถัดไป; cooldown/rebuff อยู่ใน supportTargetUse ต่อคน.
+  function supportQueueCommandWaitMs(now = nowMs()) {
+    return Math.max(0, lastSkillPacketAt + skillCommandGapMs() - now);
+  }
+  function supportTargetLastUse(skillId, targetId) {
+    const perSkill = supportTargetUse.get(Number(skillId));
+    return perSkill ? (perSkill.get(targetId) || 0) : 0;
+  }
+  function markSupportTargetUse(skillId, targetId, now) {
+    const id = Number(skillId);
+    if (!supportTargetUse.has(id)) supportTargetUse.set(id, new Map());
+    supportTargetUse.get(id).set(targetId, now);
+  }
+  // A browser WebSocket send only proves that the command left this client.
+  // Support skills have a definitive server echo (0x1d with caster, target,
+  // and skill), so their rebuff time must wait for that echo rather than for
+  // a best-effort send.  This avoids losing a whole rebuff interval when the
+  // server rejects a packet while the previous cast is still in progress.
+  function isServerConfirmedSupportJob(job) {
+    return !!job && (job.kind === 'buff-self' || job.kind === 'buff-other');
+  }
+  function isPendingSupportJob(job) {
+    return isServerConfirmedSupportJob(job) && !!job.pendingAt && !job.confirmedAt;
+  }
+  function confirmPendingSupportSkillByPacket(skillId, targetId, now = nowMs()) {
+    const job = autoSupportQueue[0];
+    if (!isPendingSupportJob(job)) return false;
+    if (Number(job.skill.skillId) !== Number(skillId) || job.targetId !== targetId) return false;
+    job.pendingAt = 0;
+    job.confirmedAt = now;
+    markSupportTargetUse(job.skill.skillId, job.targetId, now);
+    lastSkillUse.set(job.skill.skillId, now);
+    saveSkillTimesDebounced();
+    log('✅ ยืนยันบัพ', job.skill.name || ('id=' + job.skill.skillId), '→', job.targetName || 'ตัวเอง', '(server)');
+    return true;
+  }
+  function isConfiguredSupportName(skill, name) {
+    const normalized = normalizedPlayerName(name);
+    if (!normalized || !Array.isArray(skill && skill.buffNames)) return false;
+    return skill.buffNames.some(configured => normalizedPlayerName(configured) === normalized);
+  }
+  function configuredSupportNames(skill) {
+    const names = Array.isArray(skill && skill.buffNames) ? skill.buffNames : [];
+    const unique = new Set();
+    return names.map(normalizedPlayerName).filter(name => name && !unique.has(name) && unique.add(name));
+  }
+  function findNamedSupportTarget(name, skill, now) {
+    if (player.x == null || player.y == null) return null;
+    const maxDistance = Number(skill && skill.maxDistance) || 0;
+    for (const entity of entities.values()) {
+      if (entity.kind !== 0 || !entity.alive || entity.id === playerId || entity.x == null || entity.y == null) continue;
+      if (isStaleId(entity.id, now) || normalizedPlayerName(entity.name) !== name) continue;
+      if (maxDistance > 0 && Math.hypot(entity.x - player.x, entity.y - player.y) > maxDistance) continue;
+      return entity;
+    }
+    return null;
+  }
+  function isExternalSupportSkillReady(skill) {
+    if (!skill || !skill.buffMode || skill.skillId == null || skill.ground || !CFG.skills.includes(skill)) return false;
+    const disabled = Array.isArray(CFG.disabledSkillIds) ? CFG.disabledSkillIds : [];
+    if (disabled.includes(skill.skillId)) return false;
+    const spMin = skill.spMin ?? 0;
+    return !(spMin > 0 && sp.cur != null && sp.cur < spMin);
+  }
+  function supportTargetHpReady(skill, target) {
+    const hpBelow = Number(skill && skill.hpBelowPct) || 0;
+    if (hpBelow <= 0) return true;
+    if (target.id === playerId) {
+      const percent = hpPct();
+      return percent != null && percent < hpBelow;
+    }
+    const percent = target.hp != null && target.hpMax > 0 ? (target.hp / target.hpMax) * 100 : null;
+    return percent != null && percent < hpBelow;
+  }
+  function isSupportTargetReady(skill, target, now) {
+    if (!target || target.id == null || !supportTargetHpReady(skill, target)) return false;
+    if (target.id === playerId && selfSupportStatusId(skill) != null
+      && (hasSelfSupportStatus(skill, now) || isSelfSupportStatusPending(skill, now))) return false;
+    const last = supportTargetLastUse(skill.skillId, target.id);
+    return !(last > 0 && now - last < supportRepeatMs(skill));
+  }
+  // Recipient order is a batch contract: once a person enters this snapshot,
+  // every ready Support Skill for that person runs before the next person.
+  // New arrivals wait for the next snapshot; they cannot split an active set.
+  function collectSupportRecipients() {
+    const recipients = [];
+    const seen = new Set();
+    const add = (recipient) => {
+      const key = recipient.kind === 'self' ? 'self' : recipient.name;
+      if (seen.has(key)) return;
+      seen.add(key);
+      recipients.push(recipient);
+    };
+    const hasSelfSkill = CFG.skills.some(skill => skill && (
+      (!skill.buffMode && (skill.selfCast || skill.ally)) || (skill.buffMode && skill.buffIncludeSelf)
+    ));
+    if (hasSelfSkill && playerId != null) add({ kind: 'self', id: playerId, name: playerName || 'ตัวเอง' });
+    for (const skill of CFG.skills) {
+      if (!skill || !skill.buffMode) continue;
+      for (const name of configuredSupportNames(skill)) add({ kind: 'other', name });
+    }
+    return recipients;
+  }
+  function buildSupportJobForRecipient(recipient, skill, now) {
+    if (recipient.kind === 'self') {
+      if (isIdleSupportSkillReady(skill, now)) {
+        return { skill, kind: 'self', targetId: skill.ally ? playerId : null, targetName: playerName || 'ตัวเอง' };
+      }
+      if (!isExternalSupportSkillReady(skill) || !skill.buffIncludeSelf) return null;
+      const self = { id: playerId, name: playerName || 'ตัวเอง', hp: hp.cur, hpMax: hp.max };
+      return isSupportTargetReady(skill, self, now)
+        ? { skill, kind: 'buff-self', targetId: playerId, targetName: self.name }
+        : null;
+    }
+    if (!isExternalSupportSkillReady(skill) || !isConfiguredSupportName(skill, recipient.name)) return null;
+    const targetEntity = findNamedSupportTarget(recipient.name, skill, now);
+    return targetEntity && isSupportTargetReady(skill, targetEntity, now)
+      ? { skill, kind: 'buff-other', targetId: targetEntity.id, targetName: targetEntity.name }
+      : null;
+  }
+  function buildAutoSupportJobs(now, allowOtherPlayers) {
+    const jobs = [];
+    const recipients = collectSupportRecipients();
+    // Recipient-major ordering: H→B→I→K for A must finish before any job for B.
+    for (const recipient of recipients) {
+      if (isSupportRecipientDeferred(recipient, now)) continue;
+      if (recipient.kind === 'other' && !allowOtherPlayers) continue;
+      for (const skill of CFG.skills) {
+        const job = buildSupportJobForRecipient(recipient, skill, now);
+        if (job) jobs.push(job);
+      }
+    }
+    return jobs;
+  }
+  function resolveAutoSupportJobTarget(job, now) {
+    if (job.kind === 'self') return { id: job.targetId, name: job.targetName };
+    if (job.targetId === playerId) return { id: playerId, name: playerName || 'ตัวเอง', hp: hp.cur, hpMax: hp.max };
+    const entity = entities.get(job.targetId);
+    if (!entity || entity.kind !== 0 || !entity.alive || isStaleId(entity.id, now)) return null;
+    if (!isConfiguredSupportName(job.skill, entity.name)) return null;
+    const configuredName = normalizedPlayerName(job.targetName);
+    if (configuredName && normalizedPlayerName(entity.name) !== configuredName) return null;
+    const maxDistance = Number(job.skill.maxDistance) || 0;
+    if (player.x == null || player.y == null || entity.x == null || entity.y == null) return null;
+    if (maxDistance > 0 && Math.hypot(entity.x - player.x, entity.y - player.y) > maxDistance) return null;
+    return entity;
+  }
+  function isAutoSupportJobReady(job, now) {
+    if (!job || !job.skill) return false;
+    if (job.kind === 'self') return isIdleSupportSkillReady(job.skill, now);
+    const targetEntity = resolveAutoSupportJobTarget(job, now);
+    return !!targetEntity && isExternalSupportSkillReady(job.skill) && isSupportTargetReady(job.skill, targetEntity, now);
+  }
+  function getSupportSkillState(skill, now) {
+    const readyNames = [], cooldownNames = [], activeNames = [], hpWaitNames = [], unavailableNames = [], pendingNames = [], retryNames = [];
+    const pendingTargetIds = new Set(autoSupportQueue
+      .filter(job => job.skill === skill && isPendingSupportJob(job))
+      .map(job => job.targetId));
+    const targets = [];
+    if (skill.buffIncludeSelf && playerId != null) {
+      const selfRecipient = { kind: 'self', id: playerId, name: playerName || 'ตัวเอง' };
+      if (isSupportRecipientDeferred(selfRecipient, now)) retryNames.push(selfRecipient.name);
+      else targets.push({ id: playerId, name: selfRecipient.name, hp: hp.cur, hpMax: hp.max });
+    }
+    for (const name of configuredSupportNames(skill)) {
+      if (isSupportRecipientDeferred({ kind: 'other', name }, now)) { retryNames.push(name); continue; }
+      const entity = findNamedSupportTarget(name, skill, now);
+      if (entity) targets.push(entity);
+      else unavailableNames.push(name);
+    }
+    for (const targetEntity of targets) {
+      const label = targetEntity.name || 'ตัวเอง';
+      if (pendingTargetIds.has(targetEntity.id)) { pendingNames.push(label); continue; }
+      if (!supportTargetHpReady(skill, targetEntity)) { hpWaitNames.push(label); continue; }
+      if (targetEntity.id === playerId && selfSupportStatusId(skill) != null
+        && (hasSelfSupportStatus(skill, now) || isSelfSupportStatusPending(skill, now))) {
+        activeNames.push(label);
+        continue;
+      }
+      const last = supportTargetLastUse(skill.skillId, targetEntity.id);
+      if (last > 0 && now - last < supportRepeatMs(skill)) cooldownNames.push(label);
+      else readyNames.push(label);
+    }
+    const queuedNames = autoSupportQueue.filter(job => job.skill === skill).map(job => job.targetName || 'ตัวเอง');
+    return { support: true, readyNames, cooldownNames, activeNames, hpWaitNames, unavailableNames, pendingNames, retryNames, queuedNames };
+  }
+  // Self/ally และ Buff ผู้เล่นอื่นอยู่ใน queue เดียว. Snapshot นี้จึงรักษาลำดับ
+  // Skill list แม้มีหลายเป้าหมาย และใช้ skillCommandGapMs/sendSkill lane เดิมร่วมกัน.
   function isIdleSupportSkillReady(skill, now) {
     if (!skill || skill.skillId == null || skill.buffMode || !CFG.skills.includes(skill)) return false;
     if ((!skill.selfCast && !skill.ally) || skill.ground) return false;
@@ -6218,33 +6592,112 @@
     const hpBelow = Number(skill.hpBelowPct) || 0;
     return !(hpBelow > 0 && (hpPct() == null || hpPct() >= hpBelow));
   }
-  function resetAutoSupportQueue() { autoSupportQueue = []; }
-  function tryIdleSelfSupportSkill(now) {
+  // Read-only explanation for console diagnostics. It mirrors the self/ally
+  // readiness gate so a waiting Skill can be explained without sending or
+  // mutating any packet/queue state.
+  function getIdleSupportSkillState(skill, now) {
+    if (!skill || skill.skillId == null || skill.buffMode || !CFG.skills.includes(skill)) return { ready: false, reason: 'ไม่ใช่ Self/Ally Skill ที่ใช้งานอยู่' };
+    if ((!skill.selfCast && !skill.ally) || skill.ground) return { ready: false, reason: 'โหมด Skill ไม่ใช่ Self/Ally' };
+    const disabled = Array.isArray(CFG.disabledSkillIds) ? CFG.disabledSkillIds : [];
+    if (disabled.includes(skill.skillId)) return { ready: false, reason: 'ถูกปิดในรายการ Disabled Skill' };
+    if (skill.ally && playerId == null) return { ready: false, reason: 'ยังไม่รู้ player_id' };
+    if (selfSupportStatusId(skill) != null) {
+      if (hasSelfSupportStatus(skill, now)) return { ready: false, reason: 'server ยืนยันว่าบัพยังอยู่' };
+      if (isSelfSupportStatusPending(skill, now)) return { ready: false, reason: 'รอ server ยืนยันผล Skill' };
+    } else {
+      const lastUse = lastSkillUse.get(skill.skillId) || 0;
+      const intervalMin = Number(skill.intervalMin) || 0;
+      const waitMs = intervalMin > 0 ? intervalMin * 60 * 1000 : (skill.cooldownMs ?? 2000);
+      const remainingMs = lastUse > 0 ? Math.max(0, lastUse + waitMs - now) : 0;
+      if (remainingMs > 0) return { ready: false, reason: intervalMin > 0 ? 'รอรอบใช้ซ้ำของ Skill' : 'รอ cooldown ของ Skill', lastUse, remainingMs };
+    }
+    const spMin = skill.spMin ?? 0;
+    if (spMin > 0 && sp.cur != null && sp.cur < spMin) return { ready: false, reason: 'SP ไม่พอ (' + sp.cur + '/' + spMin + ')' };
+    const hpBelow = Number(skill.hpBelowPct) || 0;
+    if (hpBelow > 0 && (hpPct() == null || hpPct() >= hpBelow)) return { ready: false, reason: 'HP ยังไม่ต่ำกว่า ' + hpBelow + '%' };
+    return { ready: true, reason: 'พร้อมเข้าชุด Skill Set' };
+  }
+  function getAutoSupportBlockers(now) {
+    const blockers = [];
+    if (!CFG.skillEnabled) blockers.push('Skill: OFF');
+    if (!activeWS || activeWS.readyState !== 1) blockers.push('WebSocket ยังไม่พร้อม');
+    if (isDead) blockers.push('ตัวละครตาย');
+    if (isResting || postRespawnRest) blockers.push('กำลังพัก');
+    if (isAbBuffActive()) blockers.push('AB Buff กำลังทำงาน');
+    if (storageState !== 'IDLE') blockers.push('Storage กำลังทำงาน');
+    if (isOreRefineActive()) blockers.push('Ore Refine กำลังทำงาน');
+    if (target?.hiddenWaitAt && target.hiddenWaitReason === 'Cloaking') blockers.push('รอ Sight แก้ Cloaking');
+    if (autoSupportQueue.length && supportQueueCommandWaitMs(now) > 0) blockers.push('รอ Global Skill Gap ' + supportQueueCommandWaitMs(now) + 'ms');
+    return blockers;
+  }
+  function resetAutoSupportQueue() {
+    autoSupportQueue = [];
+    supportRecipientRetryUntil.clear();
+  }
+  function tryIdleSupportSkill(now) {
     if (!CFG.skillEnabled || !Array.isArray(CFG.skills) || !CFG.skills.length) { resetAutoSupportQueue(); return false; }
     if (!activeWS || activeWS.readyState !== 1 || isDead || isResting || postRespawnRest) return false;
     if (isAbBuffActive() || storageState !== 'IDLE' || isOreRefineActive()) return false;
     // เป้ากำลัง Cloaking: กัน Auto-Support แย่ง global skill lane ก่อน Sight ได้ทำงาน.
     if (target?.hiddenWaitAt && target.hiddenWaitReason === 'Cloaking') return false;
-    // A click on “ใช้ skill เดี๋ยวนี้” is an explicit user request; finish it
-    // first so the automatic queue cannot interleave with it.
-    if (manualSkillQueue.length || manualSkillQueueTimer) return false;
+    // Manual Skill ที่มาก่อนเริ่ม batch มีสิทธิ์ก่อนตามเดิม แต่หาก Support
+    // batch เริ่มแล้ว ต้องทำ recipient ปัจจุบันให้จบก่อนค่อยรับ Manual queue.
+    if ((manualSkillQueue.length || manualSkillQueueTimer) && !autoSupportQueue.length) return false;
 
-    while (autoSupportQueue.length && !isIdleSupportSkillReady(autoSupportQueue[0], now)) autoSupportQueue.shift();
-    if (!autoSupportQueue.length) {
-      autoSupportQueue = CFG.skills.filter(skill => isIdleSupportSkillReady(skill, now));
-      if (autoSupportQueue.length > 1) log('🔮 Auto Skill: เข้าคิว', autoSupportQueue.map(skill => skill.name || ('id=' + skill.skillId)).join(' → '));
+    // Collector อนุญาตเฉพาะ Self/Ally ตาม flow เดิม: งานบัพคนอื่นที่ค้าง
+    // จะสร้างใหม่หลัง Collector ว่าง จึงไม่ hold timer Loot Queue แบบ deadlock.
+    const allowOtherPlayers = !lootQueue.isCollectorBusy();
+    if (!allowOtherPlayers && autoSupportQueue.length) {
+      autoSupportQueue = autoSupportQueue.filter(job => job.kind !== 'buff-other');
     }
-    const skill = autoSupportQueue[0];
-    if (!skill) return false;
-    const skillTarget = skill.ally ? playerId : null;
-    if (!sendSkill(skill.skillId, skill.level || 1, skillTarget, null, null)) return false;
-
+    // A sent Support job stays at the front until the server echoes it back.
+    // Do not re-evaluate it as a fresh job first: it is either awaiting that
+    // confirmation or already confirmed and ready to release the next job.
+    while (autoSupportQueue.length && !isPendingSupportJob(autoSupportQueue[0])
+      && !autoSupportQueue[0].confirmedAt && !isAutoSupportJobReady(autoSupportQueue[0], now)) autoSupportQueue.shift();
+    if (!autoSupportQueue.length) {
+      autoSupportQueue = buildAutoSupportJobs(now, allowOtherPlayers);
+      if (autoSupportQueue.length > 1) {
+        log('🔮 Auto Skill: เข้าคิว', autoSupportQueue.map(job => (job.skill.name || ('id=' + job.skill.skillId)) + (job.kind === 'buff-other' ? '→' + job.targetName : '')).join(' → '));
+      }
+    }
+    const job = autoSupportQueue[0];
+    if (!job) return false;
+    if (job.confirmedAt) { autoSupportQueue.shift(); return true; }
+    if (isPendingSupportJob(job)) {
+      // The player disappeared or moved out of range before confirmation:
+      // release this recipient's whole set without claiming a successful buff.
+      if (!resolveAutoSupportJobTarget(job, now)) { dropSupportRecipientJobSet(job); return true; }
+      // The existing per-Skill cooldown is also the confirmation deadline.
+      // Until then, do not send a duplicate packet and do not let this person
+      // block later recipients forever.
+      if (now - job.pendingAt < supportConfirmationWaitMs(job.skill)) return true;
+      log('⚠️ ไม่ได้รับยืนยันบัพ', job.skill.name || ('id=' + job.skill.skillId), '→', job.targetName || 'ตัวเอง', 'ภายใน cooldown → ปล่อยชุดนี้ให้คิวถัดไป');
+      deferSupportRecipient(job, now);
+      dropSupportRecipientJobSet(job);
+      return true;
+    }
+    if (!isAutoSupportJobReady(job, now)) { autoSupportQueue.shift(); return true; }
+    // Skill Gap เป็น lane เดียวของทุก packet ใน Support queue. Cooldown/rebuff
+    // ของ Support ถูกเช็กต่อ Skill + ผู้เล่นแล้วใน isSupportTargetReady.
+    if (supportQueueCommandWaitMs(now) > 0) return true;
+    if (!sendSkill(job.skill.skillId, job.skill.level || 1, job.targetId, null, null)) return true;
+    if (isServerConfirmedSupportJob(job)) {
+      job.pendingAt = now;
+      job.attempts = 1;
+      log('📤 ส่งบัพ', job.skill.name || ('id=' + job.skill.skillId), '→', job.targetName || 'ตัวเอง', '(รอยืนยัน server)');
+      return true;
+    }
     autoSupportQueue.shift();
-    lastSkillUse.set(skill.skillId, now);
-    if (selfSupportStatusId(skill) != null) selfSupportPendingUntil.set(skill.skillId, now + SELF_SUPPORT_CONFIRM_MS);
+    lastSkillUse.set(job.skill.skillId, now);
+    if (job.targetId === playerId && selfSupportStatusId(job.skill) != null) selfSupportPendingUntil.set(job.skill.skillId, now + SELF_SUPPORT_CONFIRM_MS);
+    if (job.kind !== 'self') markSupportTargetUse(job.skill.skillId, job.targetId, now);
     saveSkillTimesDebounced();
     const spInfo = sp.cur != null ? (sp.max ? ` ${sp.cur}/${sp.max}` : ` ${sp.cur}`) : ' ?';
-    log('✨ ใช้สกิล', skill.name || ('id=' + skill.skillId), skill.ally ? ' (ally→ตัวเอง · Auto queue)' : ' (self · Auto queue)', '(sp' + spInfo + ' เหลือคิว=' + autoSupportQueue.length + ')');
+    const modeTag = job.kind === 'buff-other'
+      ? ' (support→' + (job.targetName || 'ผู้เล่น') + ' · Auto queue)'
+      : (job.kind === 'buff-self' ? ' (support→ตัวเอง · Auto queue)' : (job.skill.ally ? ' (ally→ตัวเอง · Auto queue)' : ' (self · Auto queue)'));
+    log('✨ ใช้สกิล', job.skill.name || ('id=' + job.skill.skillId), modeTag, '(sp' + spInfo + ' เหลือคิว=' + autoSupportQueue.length + ')');
     return true;
   }
   // MOVE OUT (click-move): [07][x:i16][y:i16] (signed)
@@ -6814,8 +7267,6 @@ function abBuffTimeoutMs() {
     return fleePlayersIfNeeded(' (หลังวาร์ป)');
   }
   function acquireTarget(now) {
-    // ★ cooldown: กันสลับ target บ่อยเกินไป (สลับได้ทุก 1.5s)
-    if (now - lastTargetSwitchAt < 1500) return null;
     // whitelist ว่าง = ตีทุกมอน kind=1 (ตามความหมายของ whitelist); ตั้งค่า = ตีเฉพาะที่ match
     const mobCount = getMobAttackerCount();
     const useLowestHp = CFG.targetLowestHpFirst && mobCount >= 2;
@@ -6843,14 +7294,13 @@ function abBuffTimeoutMs() {
       id: m.id, name: m.name, sub: m.sub, x: m.x, y: m.y, acquiredAt: now, engageAt: 0,
       lastAttackAt: 0, lastAttackResultAt: 0, lastAttackSignalAt: 0,
       attackProbeAt: 0, attackProbePos: null, followObservedAt: 0, lastFollowPos: null, lastFollowMoveAt: 0,
-      hiddenWaitAt: 0, hiddenWaitReason: '', cloakingCastAt: 0, cloakingActiveAt: 0, cloakingRemovedAt: 0,
+      hiddenWaitAt: 0, hiddenWaitReason: '', cloakingCastAt: 0, cloakingEvidenceAt: 0, cloakingActiveAt: 0, cloakingRemovedAt: 0,
       stuckCount: 0, warpCount: 0, lastDist: null,
     };
     lastWalkToTargetAt = 0;
     resetWalkProgress();
     resetCombatGatChase();
 
-    lastTargetSwitchAt = now;
     skillUsesOnTarget.clear();   // ★ reset per-target skill uses (mirror bot.js:4083)
     return target;
   }
@@ -6877,16 +7327,6 @@ function abBuffTimeoutMs() {
     }
     // sendSkill ใช้ lane กลางร่วมกับ Auto-Skill/Manual Skill; tick ถัดไปจะลองอีกครั้งถ้า lane ยังไม่ว่าง.
     if (sightPendingUntil > now) return false;
-    const mobX = m?.x ?? target.x, mobY = m?.y ?? target.y;
-    if (player.x == null || player.y == null || mobX == null || mobY == null) return false;
-    const gridDistance = Math.max(Math.abs(mobX - player.x), Math.abs(mobY - player.y));
-    if (gridDistance > SIGHT_RADIUS) {
-      if (!target.sightRangeLogged) {
-        target.sightRangeLogged = true;
-        log('👁️', target.name || target.id.toString(16), 'ซ่อน อยู่นอกระยะ Sight', gridDistance + '/' + SIGHT_RADIUS, 'ช่อง → รอเข้าระยะ');
-      }
-      return false;
-    }
     if (sp.cur != null && sp.cur < SIGHT_SP_COST) {
       if (!target.sightSpLogged) {
         target.sightSpLogged = true;
@@ -6901,8 +7341,8 @@ function abBuffTimeoutMs() {
     return true;
   }
   function hasFreshCloakingEvidence(now = nowMs()) {
-    if (!target?.cloakingCastAt) return false;
-    const age = now - target.cloakingCastAt;
+    if (!target?.cloakingEvidenceAt) return false;
+    const age = now - target.cloakingEvidenceAt;
     return age >= 0 && age <= CLOAKING_EVIDENCE_WINDOW_MS;
   }
   // คืน true เมื่อเป้าควรเข้า HIDDEN_WAIT แทน flow unreachable/despawn ปกติ
@@ -6933,6 +7373,7 @@ function abBuffTimeoutMs() {
     target.hiddenWaitAt = 0;
     target.hiddenWaitReason = '';
     target.cloakingCastAt = 0;
+    target.cloakingEvidenceAt = 0;
     target.cloakingActiveAt = 0;
     target.cloakingRemovedAt = 0;
     target.despawnCheckAt = 0;
@@ -7044,18 +7485,19 @@ function abBuffTimeoutMs() {
       }
       return;
     }
-    // A manual request deferred by Collector has no timer of its own.  Reuse
-    // this existing loop to resume it on the first idle tick.
-    if (!lootQueue.isCollectorBusy() && manualSkillQueue.length && !manualSkillQueueTimer) drainManualSkillQueue();
-    // collector มี movement/pickup flow ของ Loot Queue เป็นเจ้าของอยู่
-    if (lootQueue.isCollectorBusy()) return;
+    // Manual Skill ให้ทำงานตามคิวเดิมก่อน ส่วน Auto Support แซงได้เฉพาะ
+    // ระหว่าง Collector มีงาน เพื่อไม่เปลี่ยนลำดับความปลอดภัย Flee ใน flow ปกติ.
+    if (manualSkillQueue.length && !manualSkillQueueTimer && !autoSupportQueue.length) drainManualSkillQueue();
+    if (lootQueue.isCollectorBusy()) {
+      if (tryIdleSupportSkill(now)) return;
+      return;
+    }
     // Player Flee เป็น safety flow อิสระจาก Combat: OFF ก็ยังต้องหนีผู้เล่นที่ยืนนิ่งอยู่ได้
     // AB Buff / Storage hold อยู่ภายใน fleePlayersIfNeeded แล้ว
     if (!isDead && activeWS && activeWS.readyState === 1 && fleePlayersIfNeeded()) return;
-    // Self/ally support has its own ordered queue and is independent from
-    // target acquisition.  It runs before either Combat branch so two skill
-    // controllers can never select the same buff concurrently.
-    if (tryIdleSelfSupportSkill(now)) return;
+    // Self/ally และ Support ผู้เล่นอื่นใช้ queue เดียว และเป็นอิสระจาก
+    // target acquisition. Outside Collector, preserve Flee's safety priority.
+    if (tryIdleSupportSkill(now)) return;
     // AI Reply เป็น flow สนทนา ไม่ควรผูกกับ toggle Combat
     // แต่ถ้ามี target ค้างอยู่ จะยังไม่ตอบจนกว่า combat จะจัดการ target นั้นได้
     if (!CFG.combatEnabled) {
@@ -7240,9 +7682,8 @@ function abBuffTimeoutMs() {
         if (d < attackerDist) { attackerDist = d; attacker = am; }
       }
       if (attacker) {
-        target = { id: attacker.id, name: attacker.name, sub: attacker.sub, x: attacker.x, y: attacker.y, acquiredAt: now, engageAt: 0, lastAttackAt: 0, lastAttackResultAt: 0, lastAttackSignalAt: 0, attackProbeAt: 0, attackProbePos: null, followObservedAt: 0, lastFollowPos: null, lastFollowMoveAt: 0, hiddenWaitAt: 0, hiddenWaitReason: '', cloakingCastAt: 0, cloakingActiveAt: 0, cloakingRemovedAt: 0, stuckCount: 0, warpCount: 0 };
+        target = { id: attacker.id, name: attacker.name, sub: attacker.sub, x: attacker.x, y: attacker.y, acquiredAt: now, engageAt: 0, lastAttackAt: 0, lastAttackResultAt: 0, lastAttackSignalAt: 0, attackProbeAt: 0, attackProbePos: null, followObservedAt: 0, lastFollowPos: null, lastFollowMoveAt: 0, hiddenWaitAt: 0, hiddenWaitReason: '', cloakingCastAt: 0, cloakingEvidenceAt: 0, cloakingActiveAt: 0, cloakingRemovedAt: 0, stuckCount: 0, warpCount: 0 };
         resetCombatGatChase();
-        lastTargetSwitchAt = now;
         log('🛡️ เลือกเป้า: มอนที่กำลังตีเรา', attacker.name || attacker.id.toString(16));
         return;
       }
@@ -7368,7 +7809,7 @@ function abBuffTimeoutMs() {
       const disabled = Array.isArray(CFG.disabledSkillIds) ? CFG.disabledSkillIds : [];
       for (const skill of CFG.skills) {
         if (!skill || skill.skillId == null) continue;
-        if (skill.buffMode) continue; // buff ให้คนอื่นมี controller แยกและ default OFF
+        if (skill.buffMode) continue; // Support queue ด้านบนเป็นเจ้าของ buff ผู้เล่นอื่น
         if (skill.selfCast || skill.ally) continue; // คิว support ด้านบนเป็นเจ้าของ self/ally ทั้งหมด
         if (disabled.includes(skill.skillId)) continue;
         const needsTarget = (skill.targeted || skill.ground) && !skill.selfCast && !skill.ally;
@@ -8500,6 +8941,7 @@ function abBuffTimeoutMs() {
     // state เหล่านี้ไม่ใช่ค่า setting และไม่ควรติดจากงานเก่าไปใช้กับ profile ใหม่
     target = null;
     weaponSwap = null;
+    supportTargetUse.clear();
     resetAutoSupportQueue();
     combatCooldownUntil = 0;
     postWarpFleeScanPending = false;
@@ -8989,6 +9431,8 @@ function abBuffTimeoutMs() {
         selfCast: !!s.selfCast,
         ally: !!s.ally,
         buffMode: !!s.buffMode,
+        buffNames: Array.isArray(s.buffNames) ? s.buffNames.map(name => String(name || '').trim()).filter(Boolean) : [],
+        buffIncludeSelf: !!s.buffIncludeSelf,
         intervalMin: Number(s.intervalMin) || 0,
         mobCountMin: Number(s.mobCountMin) || 0,
         maxUsesPerTarget: Number(s.maxUsesPerTarget) || 1,
@@ -8998,6 +9442,7 @@ function abBuffTimeoutMs() {
         cooldownMs: Number(s.cooldownMs) || 2000,
         hpBelowPct: Math.max(0, Math.min(100, Number(s.hpBelowPct) || 0)),
       }));
+      supportTargetUse.clear();
       resetAutoSupportQueue();
       log('✨ skills =', CFG.skills.length, 'รายการ');
     },
@@ -9007,17 +9452,19 @@ function abBuffTimeoutMs() {
       const existing = CFG.skills.find(s => s.skillId === skill.skillId && modeKey(s) === modeKey(skill));
       if (existing) { Object.assign(existing, skill); log('✨ แก้ skill', skill.skillId, '(' + modeKey(skill) + ')'); }
       else { CFG.skills.push(skill); log('✨ เพิ่ม skill', skill.skillId, '(' + modeKey(skill) + ')'); }
+      supportTargetUse.delete(Number(skill.skillId));
       resetAutoSupportQueue();
     },
     removeSkill(skillId) {
       CFG.skills = CFG.skills.filter(s => s.skillId !== skillId);
+      supportTargetUse.delete(Number(skillId));
       resetAutoSupportQueue();
       log('✨ ลบ skill', skillId);
     },
     skillNow() {
       queueSkillsNow();
     },
-    clearSkillTimes() { lastSkillUse.clear(); selfSupportPendingUntil.clear(); resetAutoSupportQueue(); saveSkillTimes(); log('✨ ล้างเวลา skill ทั้งหมด'); },
+    clearSkillTimes() { lastSkillUse.clear(); selfSupportPendingUntil.clear(); supportTargetUse.clear(); resetAutoSupportQueue(); saveSkillTimes(); log('✨ ล้างเวลา skill ทั้งหมด'); },
     getSkillCooldowns() {
       const now = nowMs();
       return CFG.skills.map(s => {
@@ -9029,6 +9476,9 @@ function abBuffTimeoutMs() {
     getSkillStates() {
       const now = nowMs();
       return CFG.skills.map(s => {
+        if (s.buffMode) return { skillId: s.skillId, name: s.name, ...getSupportSkillState(s, now) };
+        // Status ที่เห็นบน HUD เป็นของตัวเราเท่านั้น จึงห้ามรายงานว่า
+        // Support ที่บัพชื่อคนอื่นกำลัง active จาก status ของเรา.
         const statusId = selfSupportStatusId(s);
         if (statusId != null) return {
           skillId: s.skillId, name: s.name, statusBacked: true, statusId,
@@ -9038,6 +9488,19 @@ function abBuffTimeoutMs() {
         const cd = (s.intervalMin > 0) ? s.intervalMin * 60 * 1000 : (s.cooldownMs || 2000);
         return { skillId: s.skillId, name: s.name, statusBacked: false, active: false, pending: false, remainingMs: Math.max(0, last + cd - now) };
       });
+    },
+    skillQueueStatus() {
+      const now = nowMs();
+      return {
+        blockers: getAutoSupportBlockers(now),
+        globalGapRemainingMs: autoSupportQueue.length ? supportQueueCommandWaitMs(now) : 0,
+        manualQueue: manualSkillQueue.map(job => job.skill.name || ('id=' + job.skill.skillId)),
+        supportQueue: autoSupportQueue.map(job => ({ skill: job.skill.name || ('id=' + job.skill.skillId), target: job.targetName || 'ตัวเอง', kind: job.kind })),
+        skills: CFG.skills.filter(skill => skill && (skill.buffMode || skill.selfCast || skill.ally)).map(skill => {
+          if (skill.buffMode) return { skill: skill.name, mode: 'support', ...getSupportSkillState(skill, now) };
+          return { skill: skill.name, mode: skill.ally ? 'ally' : 'self', ...getIdleSupportSkillState(skill, now) };
+        }),
+      };
     },
     restOn()  { CFG.restEnabled = true;  log('🪑 Auto-Rest: ON (HP < ' + CFG.restHpPercent + '% → นั่งพัก)'); },
     restOff() { CFG.restEnabled = false; if (isResting) { sendStand(); isResting = false; } log('🪑 Auto-Rest: OFF'); },
@@ -9071,6 +9534,11 @@ function abBuffTimeoutMs() {
       CFG.depositWeightPercent = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
       saveConfigDebounced();
       log('🏦 เริ่มฝากเมื่อน้ำหนัก ≥', CFG.depositWeightPercent ? CFG.depositWeightPercent + '%' : 'ปิด');
+    },
+    setStorageTransferGapMs(ms) {
+      CFG.storageTransferGapMs = normalizeStorageTransferGapMs(ms);
+      saveConfigDebounced();
+      log('🏦 ระยะห่างย้ายของ Kafra =', CFG.storageTransferGapMs + 'ms');
     },
     getWeight() {
       const percent = inventoryWeightPercent();
@@ -9109,6 +9577,7 @@ function abBuffTimeoutMs() {
         blockers: auto.blockers,
         weight: { percent: weight == null ? null : Number(weight.toFixed(2)), current: currentWeightRaw == null ? null : currentWeightRaw / 10, max: maxWeightRaw == null ? null : maxWeightRaw / 10, source: lastWeightSource || null },
         depositMode: storageDepositMode(),
+        transferGapMs: storageTransferGapMs(),
         depositItemsConfigured: CFG.depositItemIds.length,
         depositItemsInInventory: storageDepositItemIds().filter(id => (inventory.get(id) || 0) > 0),
         retryRemainingMs: Math.max(0, storageRetryAt - nowMs()),
@@ -9198,7 +9667,7 @@ function abBuffTimeoutMs() {
       if ('claimDelayMs' in values && Number.isFinite(values.claimDelayMs)) CFG.lootQueueClaimDelayMs = Math.max(0, Math.min(30000, Math.round(values.claimDelayMs)));
       if ('warpCooldownMs' in values && Number.isFinite(values.warpCooldownMs)) CFG.lootQueueWarpCooldownMs = Math.max(0, Math.min(10000, Math.round(values.warpCooldownMs)));
       if ('actionTimeoutMs' in values && Number.isFinite(values.actionTimeoutMs)) CFG.lootQueueActionTimeoutMs = Math.max(100, Math.min(30000, Math.round(values.actionTimeoutMs)));
-      if ('pickupRetryCount' in values && Number.isFinite(values.pickupRetryCount)) CFG.lootQueuePickupRetryCount = Math.max(0, Math.min(5, Math.round(values.pickupRetryCount)));
+      if ('pickupRetryCount' in values && Number.isFinite(values.pickupRetryCount)) CFG.lootQueuePickupRetryCount = Math.max(3, Math.min(6, Math.round(values.pickupRetryCount)));
       saveConfigDebounced();
       lootQueue.reconnect();
       log('📮 Loot Queue:', CFG.lootQueueRole, 'mode=' + lootQueueTransportLabel(), 'group=' + CFG.lootQueueGroup, 'home=' + (CFG.lootQueueHomeMap || '-'));
@@ -9759,9 +10228,9 @@ function abBuffTimeoutMs() {
     { name: "Brandish Spear", skillId: 38, level: 10, targeted: true, maxDistance: 9, maxUsesPerTarget: 1, spMin: 12, cooldownMs: 2000, job: "Knight", desc: "โจมตี · SP 12/12/12/12/12/12/12/12/12/12 · ยังไม่ทดสอบ" },
     { name: "Spear Boomerang", skillId: 39, level: 5, targeted: true, maxDistance: 9, maxUsesPerTarget: 1, spMin: 10, cooldownMs: 2000, job: "Knight", desc: "โจมตี · SP 10 · ยังไม่ทดสอบ" },
     { name: "Heal", skillId: 41, level: 10, ally: true, hpBelowPct: 50, spMin: 40, cooldownMs: 2500, job: "Acolyte", desc: "Ally→ใช้กับตัวเอง · ใช้เมื่อ HP<50% · SP 13/16/19/22/25/28/31/34/37/40 · ปรับเลเวลได้ · ยังไม่ทดสอบ" },
-    { name: "Heal (รักษาผู้เล่นอื่น)", skillId: 41, level: 10, buffMode: true, buffAll: true, targetHpBelowPct: 90, repeatSec: 30, maxDistance: 9, spMin: 40, cooldownMs: 2500, job: "Acolyte/Priest", desc: "บอทรักษา · ให้ทุกคนที่ HP<90% ในรัศมี 9 ช่อง · ซ้ำ/คนทุก 30 วิ · SP 13-40 · ยังไม่ทดสอบ" },
-    { name: "Blessing (บัพให้คน)", skillId: 44, level: 10, buffMode: true, buffAll: true, repeatSec: 300, maxDistance: 9, spMin: 64, cooldownMs: 3000, job: "Acolyte/Priest", desc: "บอทบัพ · ให้ทุกคนในรัศมี 9 ช่อง · ซ้ำ/คนทุก 5 นาที · SP 28-64 · ยังไม่ทดสอบ" },
-    { name: "Increase Agility (บัพให้คน)", skillId: 42, level: 10, buffMode: true, buffAll: true, repeatSec: 300, maxDistance: 9, spMin: 45, cooldownMs: 3000, job: "Acolyte/Priest", desc: "บอทบัพ · ให้ทุกคนในรัศมี 9 ช่อง · ซ้ำ/คนทุก 5 นาที · SP 18-45 · ยังไม่ทดสอบ" },
+    { name: "Heal (Support)", skillId: 41, level: 10, buffMode: true, buffNames: [], buffIncludeSelf: false, hpBelowPct: 90, maxDistance: 9, spMin: 40, cooldownMs: 2500, job: "Acolyte/Priest", desc: "Support · ตั้งรายชื่อเป้าหมายเอง · Heal เมื่อ HP เป้าหมายต่ำกว่าเกณฑ์" },
+    { name: "Blessing (Support)", skillId: 44, level: 10, buffMode: true, buffNames: [], buffIncludeSelf: false, intervalMin: 4, maxDistance: 9, spMin: 64, cooldownMs: 3000, job: "Acolyte/Priest", desc: "Support · ตั้งรายชื่อเป้าหมายเอง · ตั้งรอบบัพซ้ำ/คนใน Skill" },
+    { name: "Increase Agility (Support)", skillId: 42, level: 10, buffMode: true, buffNames: [], buffIncludeSelf: false, intervalMin: 4, maxDistance: 9, spMin: 45, cooldownMs: 3000, job: "Acolyte/Priest", desc: "Support · ตั้งรายชื่อเป้าหมายเอง · ตั้งรอบบัพซ้ำ/คนใน Skill" },
     { name: "Increase Agility", skillId: 42, level: 10, ally: true, intervalMin: 4, spMin: 45, cooldownMs: 2000, job: "Acolyte", desc: "Ally→ใช้กับตัวเอง · SP 18/21/24/27/30/33/36/39/42/45 · ปรับเลเวลได้ · ยังไม่ทดสอบ" },
     { name: "Decrease Agility", skillId: 43, level: 10, targeted: true, maxDistance: 9, maxUsesPerTarget: 1, spMin: 33, cooldownMs: 2000, job: "Acolyte", desc: "โจมตี · SP 15/17/19/21/23/25/27/29/31/33 · ยังไม่ทดสอบ" },
     { name: "Blessing", skillId: 44, level: 10, ally: true, intervalMin: 4, spMin: 64, cooldownMs: 2000, job: "Acolyte", desc: "Ally→ใช้กับตัวเอง · SP 28/32/36/40/44/48/52/56/60/64 · ปรับเลเวลได้ · ยังไม่ทดสอบ" },
@@ -9792,7 +10261,9 @@ function abBuffTimeoutMs() {
     { name: "Gloria", skillId: 79, level: 5, selfCast: true, intervalMin: 4, spMin: 20, cooldownMs: 2000, job: "Priest", desc: "ตัวเอง · SP 20/20/20/20/20 · ยังไม่ทดสอบ" },
     { name: "Magnificat", skillId: 80, level: 5, selfCast: true, intervalMin: 4, spMin: 40, cooldownMs: 2000, job: "Priest", desc: "ตัวเอง · SP 40/40/40/40/40 · ยังไม่ทดสอบ" },
     { name: "Impositio Manus", skillId: 81, level: 5, ally: true, intervalMin: 4, spMin: 24, cooldownMs: 2000, job: "Priest", desc: "Ally→ใช้กับตัวเอง · SP 13/16/19/21/24 · ยังไม่ทดสอบ" },
+    { name: "Impositio Manus (Support)", skillId: 81, level: 5, buffMode: true, buffNames: [], buffIncludeSelf: false, intervalMin: 4, maxDistance: 9, spMin: 24, cooldownMs: 2000, job: "Priest", desc: "Support · ตั้งรายชื่อเป้าหมายเอง" },
     { name: "Kyrie Eleison", skillId: 82, level: 10, ally: true, intervalMin: 4, spMin: 35, cooldownMs: 2000, job: "Priest", desc: "Ally→ใช้กับตัวเอง · SP 20/20/20/25/25/25/30/30/30/35 · ยังไม่ทดสอบ" },
+    { name: "Kyrie Eleison (Support)", skillId: 82, level: 10, buffMode: true, buffNames: [], buffIncludeSelf: false, intervalMin: 4, maxDistance: 9, spMin: 35, cooldownMs: 2000, job: "Priest", desc: "Support · ตั้งรายชื่อเป้าหมายเอง" },
     { name: "Lex Aeterna", skillId: 83, level: 1, targeted: true, maxDistance: 9, maxUsesPerTarget: 1, spMin: 10, cooldownMs: 2000, job: "Priest", desc: "โจมตี · SP 10 · ยังไม่ทดสอบ" },
     { name: "Lex Divina", skillId: 84, level: 5, targeted: true, maxDistance: 9, maxUsesPerTarget: 1, spMin: 20, cooldownMs: 2000, job: "Priest", desc: "โจมตี · SP 20/20/20/20/20/18/16/14/12/10 · ยังไม่ทดสอบ" },
     { name: "Magnus Exorcismus", skillId: 85, level: 10, ground: true, maxDistance: 9, mobCountMin: 2, maxUsesPerTarget: 1, spMin: 58, cooldownMs: 2000, job: "Priest", desc: "AoEพื้น · SP 40/42/44/46/48/50/52/54/56/58 · ยังไม่ทดสอบ" },
@@ -9983,24 +10454,26 @@ function abBuffTimeoutMs() {
       const skills = CFG.skills || [];
       let html = '';
       html += `<div style="padding:6px 8px;color:#8ab4f8;font-size:11px;font-weight:600;border-bottom:1px solid #2a2d35">🔮 skill list (${skills.length})</div>`;
-      html += `<div style="padding:5px 8px;color:#9aa0a6;font-size:9px;border-bottom:1px solid #2a2d35">⏱️ คิวสกิลเว้น ${(skillCommandGapMs() / 1000).toFixed(1)}s ทุกคำสั่ง · Blessing / Agility / Kyrie เช็ค status จาก server; สกิลอื่นใช้ cooldown fallback</div>`;
+      html += `<div style="padding:5px 8px;color:#9aa0a6;font-size:9px;border-bottom:1px solid #2a2d35">⏱️ Support เรียงทุกคำสั่งด้วย Skill Gap ${(skillCommandGapMs() / 1000).toFixed(1)}s · รอบบัพ/คูลดาวน์นับแยกตามชื่อผู้เล่น; status จาก server เช็กได้เฉพาะบัพตัวเอง</div>`;
       html += skills.length ? skills.map((s, i) => {
-        const mode = s.selfCast ? 'self' : (s.ally ? 'ally' : (s.targeted ? 'target' : (s.ground ? 'ground' : 'AoE')));
-        const modeColor = s.ally ? '#29b6f6' : (s.selfCast ? '#27ae60' : (s.targeted ? '#e67e22' : '#8e44ad'));
+        const mode = s.buffMode ? 'support' : (s.selfCast ? 'self' : (s.ally ? 'ally' : (s.targeted ? 'target' : (s.ground ? 'ground' : 'AoE'))));
+        const modeColor = s.buffMode ? '#d4e157' : (s.ally ? '#29b6f6' : (s.selfCast ? '#27ae60' : (s.targeted ? '#e67e22' : '#8e44ad')));
         const spStr = s.spMin ? ` SP≥${s.spMin}` : '';
-        const cdStr = selfSupportStatusId(s) != null ? ' เช็ค status' : (s.intervalMin > 0 ? ` ทุก${s.intervalMin}นาที` : (s.cooldownMs ? ` cd${(s.cooldownMs/1000).toFixed(0)}s` : ''));
+        const cdStr = !s.buffMode && selfSupportStatusId(s) != null ? ' เช็ค status'
+          : (s.intervalMin > 0 ? (s.buffMode ? ` ซ้ำ/คนทุก${s.intervalMin}นาที` : ` ทุก${s.intervalMin}นาที`) : (s.cooldownMs ? ` cd${(s.cooldownMs/1000).toFixed(0)}s` : ''));
         const distStr = s.maxDistance ? ` ≤${s.maxDistance}ช่อง` : '';
+        const supportStr = s.buffMode ? ` ${s.buffIncludeSelf ? 'รวมตัวเอง +' : ''}${Array.isArray(s.buffNames) && s.buffNames.length ? s.buffNames.join(',') : 'ยังไม่ตั้งชื่อ'}` : '';
         let row = `<div style="padding:5px 6px;border-bottom:1px solid rgba(255,255,255,.04)">
           <div style="display:flex;align-items:center;gap:8px">
             <span style="flex:1;font-size:11px;color:#e8e8e8">${s.name || 'skill_'+s.skillId} <span style="color:#5f6368">(#${s.skillId} Lv${s.level})</span></span>
             <span style="font-size:10px;color:${modeColor};background:${modeColor}22;padding:1px 6px;border-radius:3px">${mode}</span>
-            <span style="font-size:10px;color:#9aa0a6">${spStr}${cdStr}${distStr}</span>
+            <span style="font-size:10px;color:#9aa0a6">${spStr}${supportStr}${cdStr}${distStr}</span>
             <button data-editskill="${i}" style="background:#2a3441;border:1px solid #3a3f4b;border-radius:4px;color:#8ab4f8;cursor:pointer;font-size:11px;padding:3px 8px">✎</button>
             <button class="rmbtn" data-rmskill="${i}" style="background:#4a2020;border:1px solid #6a3030;border-radius:4px;color:#e8e8e8;cursor:pointer;font-size:11px;padding:3px 8px">✕</button>
           </div>`;
         // ★ ฟอร์มแก้ไข (แสดงเมื่อกด ✎)
         if (editingSkillIdx === i) {
-          const modeVal = s.selfCast ? 'self' : (s.ally ? 'ally' : (s.ground ? 'ground' : (s.targeted ? 'targeted' : 'aoe')));
+          const modeVal = s.buffMode ? 'buff' : (s.selfCast ? 'self' : (s.ally ? 'ally' : (s.ground ? 'ground' : (s.targeted ? 'targeted' : 'aoe'))));
           const fld = (label, inner, title) => `<label style="display:flex;flex-direction:column;gap:1px;font-size:9px;color:#9aa0a6" title="${title}">${label}${inner}</label>`;
           const inp = (key, val, w) => `<input data-edit="${key}" type="number" value="${val}" style="width:${w};background:#15171c;border:1px solid #3a3f4b;border-radius:4px;color:#e8e8e8;padding:4px 6px;font-size:10px;font-family:inherit">`;
           row += `<div style="padding:8px;background:rgba(0,0,0,.2);border-radius:4px;margin-top:4px">
@@ -10016,19 +10489,24 @@ function abBuffTimeoutMs() {
                 <option value="aoe"${modeVal==='aoe'?' selected':''}>AoE — รอบตัว (Magnum Break)</option>
                 <option value="self"${modeVal==='self'?' selected':''}>self-cast — ใช้กับตัวเอง (Quicken, Blessing)</option>
                 <option value="ally"${modeVal==='ally'?' selected':''}>ally — สกิล Ally ใช้กับตัวเอง (Heal, Kyrie)</option>
-              </select>`, 'targeted=ต้องมีมอนเป้าหมาย, AoE=ใช้รอบตัว, self=ใช้กับตัวเอง')}
+                <option value="buff"${modeVal==='buff'?' selected':''}>support — บัพตัวเอง/ผู้เล่นตามชื่อ</option>
+              </select>`, 'support ใช้คิว Skill เดียวกับ self/ally และส่งให้เฉพาะชื่อที่ระบุ')}
             </div>
             <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">
               ${fld('SP ขั้นต่ำ', inp('spMin', s.spMin||0, '55px'), 'SP ต้องมากกว่าหรือเท่ากับค่านี้ถึงจะใช้')}
-              ${fld('Cooldown (วินาที)', `<input data-edit="cooldownSec" type="text" inputmode="decimal" value="${((s.cooldownMs||2000)/1000).toFixed(1)}" style="width:60px;background:#15171c;border:1px solid #3a3f4b;border-radius:4px;color:#e8e8e8;padding:4px 6px;font-size:10px;font-family:inherit">`, 'รอใช้สกิลเดิมซ้ำ เช่น 2 = 2 วินาที; ใช้เมื่อระยะเวลา (นาที) เป็น 0 เท่านั้น')}
+              ${fld('Cooldown (วินาที)', `<input data-edit="cooldownSec" type="text" inputmode="decimal" value="${((s.cooldownMs||2000)/1000).toFixed(1)}" style="width:60px;background:#15171c;border:1px solid #3a3f4b;border-radius:4px;color:#e8e8e8;padding:4px 6px;font-size:10px;font-family:inherit">`, s.buffMode ? 'เวลารอยืนยันบัพจาก server; เงียบครบเวลาจะปล่อยทั้งชุดของชื่อนี้ แล้วลองใหม่ตามค่าเดียวกัน' : 'รอใช้สกิลเดิมซ้ำ เช่น 2 = 2 วินาที; ใช้เมื่อระยะเวลา (นาที) เป็น 0 เท่านั้น')}
               ${fld('ระยะสูงสุด', inp('maxDistance', s.maxDistance||0, '55px'), 'ต้องอยู่ใกล้ไม่เกินกี่ช่อง (0=ไม่จำกัด)')}
               ${fld('ครั้ง/มอน', inp('maxUsesPerTarget', s.maxUsesPerTarget||1, '55px'), 'ใช้สกิลนี้ได้กี่ครั้งต่อมอน 1 ตัว')}
               ${fld('มอนขั้นต่ำ', inp('mobCountMin', s.mobCountMin||0, '55px'), 'ใช้เมื่อมอนรุมมากกว่าหรือเท่ากับ N ตัว')}
             </div>
             <div style="display:flex;gap:6px;margin-bottom:6px">
-              ${fld('ระยะเวลา (นาที) — ใช้ซ้ำ', `<input data-edit="intervalMin" type="number" step="0.5" value="${s.intervalMin||0}" style="flex:1;background:#15171c;border:1px solid #3a3f4b;border-radius:4px;color:#e8e8e8;padding:4px 6px;font-size:10px;font-family:inherit">`, 'รอใช้สกิลเดิมทุก N นาที; มากกว่า 0 จะใช้แทน Cooldown (วินาที), 0 จึงใช้ Cooldown')}
+              ${fld(s.buffMode ? 'บัพซ้ำ/คน (นาที)' : 'ระยะเวลา (นาที) — ใช้ซ้ำ', `<input data-edit="intervalMin" type="number" step="0.5" value="${s.intervalMin||0}" style="flex:1;background:#15171c;border:1px solid #3a3f4b;border-radius:4px;color:#e8e8e8;padding:4px 6px;font-size:10px;font-family:inherit">`, s.buffMode ? 'บัพเป้าหมายเดิมซ้ำทุก N นาที; 0 ใช้ Cooldown เดิมของ Skill' : 'รอใช้สกิลเดิมทุก N นาที; มากกว่า 0 จะใช้แทน Cooldown (วินาที), 0 จึงใช้ Cooldown')}
               ${fld('ระยะต่ำสุด (ช่อง)', `<input data-edit="minDistance" type="number" value="${s.minDistance||0}" style="flex:1;background:#15171c;border:1px solid #3a3f4b;border-radius:4px;color:#e8e8e8;padding:4px 6px;font-size:10px;font-family:inherit">`, 'ต้องอยู่ไกลอย่างน้อย N ช่อง (เช่น Charge Attack)')}
-              ${fld('ใช้เมื่อ HP < %', inp('hpBelowPct', s.hpBelowPct||0, '60px'), '0=ไม่สน HP; เช่น Heal ตั้ง 50 จะใช้เมื่อ HP ต่ำกว่า 50%')}
+              ${fld(s.buffMode ? 'HP เป้าหมาย < %' : 'ใช้เมื่อ HP < %', inp('hpBelowPct', s.hpBelowPct||0, '60px'), s.buffMode ? '0=ไม่สน HP; Heal จะใช้เมื่อ HP ของตัวเองหรือชื่อเป้าหมายต่ำกว่าเกณฑ์' : '0=ไม่สน HP; เช่น Heal ตั้ง 50 จะใช้เมื่อ HP ต่ำกว่า 50%')}
+            </div>
+            <div style="display:flex;gap:6px;margin-bottom:6px;flex-wrap:wrap">
+              ${fld('รายชื่อ Support', `<input data-edit="buffNames" value="${(Array.isArray(s.buffNames) ? s.buffNames : []).join(',')}" placeholder="คั่นด้วย comma" style="min-width:180px;background:#15171c;border:1px solid #3a3f4b;border-radius:4px;color:#e8e8e8;padding:4px 6px;font-size:10px;font-family:inherit">`, 'เฉพาะโหมด support: เทียบชื่อแบบตรงตัว ไม่สนตัวพิมพ์')}
+              ${fld('รวมตัวเอง', `<select data-edit="buffIncludeSelf" style="width:58px;background:#15171c;border:1px solid #3a3f4b;border-radius:4px;color:#e8e8e8;padding:4px 3px;font-size:10px;font-family:inherit"><option value="1"${s.buffIncludeSelf?' selected':''}>ใช่</option><option value="0"${!s.buffIncludeSelf?' selected':''}>ไม่</option></select>`, 'เฉพาะโหมด support: ให้ใช้ Skill เดียวกันกับตัวเองด้วย')}
             </div>
             <div style="display:flex;gap:4px">
               <button data-saveedit="${i}" style="flex:1;background:#1b5e20;border:1px solid #2e7d32;border-radius:4px;color:#a5d6a7;cursor:pointer;font-size:10px;padding:5px;font-family:inherit">✓ บันทึก</button>
@@ -10040,12 +10518,19 @@ function abBuffTimeoutMs() {
         return row;
       }).join('') : `<div class="empty">(ยังว่าง — เพิ่มด้านล่าง)</div>`;
 
+      // Support เป็นการตั้งค่าราย Skill จึงมีปุ่มลัดแยกให้เปิด/เพิ่ม Skill
+      // ที่ถูกต้อง แล้วผู้ใช้กำหนดรายชื่อจากฟอร์ม edit ของ Skill นั้นทันที.
+      const supportPresets = SKILL_PRESETS.filter(s => s.buffMode);
+      html += `<div style="padding:6px 8px;color:#d4e157;font-size:11px;font-weight:600;border-bottom:1px solid #2a2d35;margin-top:6px">🤝 บัพผู้เล่นอื่น</div>`;
+      html += `<div style="padding:8px;color:#9aa0a6;font-size:10px">กดชื่อสกิลเพื่อเพิ่มหรือเปิดแก้ไข แล้วระบุชื่อตัวละครที่ต้องการบัพ</div>`;
+      html += `<div style="display:flex;gap:4px;flex-wrap:wrap;padding:0 8px 8px">${supportPresets.map(s => `<button data-open-support="${s.skillId}" style="background:#3e4620;border:1px solid #69742d;border-radius:4px;color:#e6ee9c;cursor:pointer;font-size:10px;padding:5px 7px;font-family:inherit">${s.name.replace(' (Support)', '')}</button>`).join('')}</div>`;
+
       // ★ preset dropdown — เลือกสกิลสำเร็จรูปจาก database
       const groups = skillPresetGroups();
       const presetOpts = Object.entries(groups).map(([job, skills]) => {
         const skillOpts = skills.map((s, i) => {
           const idx = SKILL_PRESETS.indexOf(s);
-          const mode = s.selfCast ? 'self' : (s.ally ? 'ally' : (s.targeted ? 'target' : (s.ground ? 'ground' : 'AoE')));
+          const mode = s.buffMode ? 'support' : (s.selfCast ? 'self' : (s.ally ? 'ally' : (s.targeted ? 'target' : (s.ground ? 'ground' : 'AoE'))));
           return `<option value="${idx}">${s.name} (Lv${s.level}, ${mode}) — ${s.desc || ''}</option>`;
         }).join('');
         return `<optgroup label="${job}">${skillOpts}</optgroup>`;
@@ -10071,6 +10556,7 @@ function abBuffTimeoutMs() {
           <option value="aoe">AoE (Magnum Break — รอบตัว)</option>
           <option value="self">self-cast (Quicken — บัพตัวเอง)</option>
           <option value="ally">ally (Heal/Kyrie — สกิล Ally ใช้กับตัวเอง)</option>
+          <option value="buff">support (บัพตัวเอง/ผู้เล่นตามชื่อ)</option>
         </select>
         <div style="display:flex;gap:4px;margin-bottom:4px">
           <input id="__assist_skill_sp" type="number" placeholder="spMin" value="0" style="flex:1;background:#15171c;border:1px solid #3a3f4b;border-radius:5px;color:#e8e8e8;padding:5px 7px;font-size:11px;font-family:inherit">
@@ -10085,6 +10571,12 @@ function abBuffTimeoutMs() {
           <input id="__assist_skill_interval" type="number" placeholder="intervalMin (0=cooldown)" value="0" step="0.5" style="flex:1;background:#15171c;border:1px solid #3a3f4b;border-radius:5px;color:#e8e8e8;padding:5px 7px;font-size:11px;font-family:inherit">
           <input id="__assist_skill_mindist" type="number" placeholder="minDist" value="0" style="flex:1;background:#15171c;border:1px solid #3a3f4b;border-radius:5px;color:#e8e8e8;padding:5px 7px;font-size:11px;font-family:inherit">
           <input id="__assist_skill_hpbelow" type="number" placeholder="HP<% (0=off)" value="0" min="0" max="100" style="flex:1;background:#15171c;border:1px solid #3a3f4b;border-radius:5px;color:#e8e8e8;padding:5px 7px;font-size:11px;font-family:inherit">
+        </div>
+        <div style="display:flex;gap:4px;margin-bottom:6px">
+          <input id="__assist_skill_buffnames" placeholder="support names (comma)" style="flex:2;background:#15171c;border:1px solid #3a3f4b;border-radius:5px;color:#e8e8e8;padding:5px 7px;font-size:11px;font-family:inherit" title="เฉพาะโหมด support: เทียบชื่อแบบตรงตัว ไม่สนตัวพิมพ์">
+          <select id="__assist_skill_buffself" style="flex:1;background:#15171c;border:1px solid #3a3f4b;border-radius:5px;color:#e8e8e8;padding:5px 7px;font-size:11px;font-family:inherit" title="เฉพาะโหมด support: รวมตัวเองด้วย">
+            <option value="0">ไม่รวมตัวเอง</option><option value="1">รวมตัวเอง</option>
+          </select>
         </div>
         <button id="__assist_skill_addbtn" style="width:100%;background:#1b5e20;border:1px solid #2e7d32;border-radius:5px;color:#a5d6a7;cursor:pointer;font-size:11px;padding:6px;font-family:inherit">+ เพิ่ม skill</button>
       </div>`;
@@ -10136,6 +10628,10 @@ function abBuffTimeoutMs() {
           s.ground = mode === 'ground';
           s.selfCast = mode === 'self';
           s.ally = mode === 'ally';
+          s.buffMode = mode === 'buff';
+          const supportNames = getVal('buffNames').split(',').map(name => name.trim()).filter(Boolean);
+          s.buffNames = supportNames;
+          s.buffIncludeSelf = getVal('buffIncludeSelf') === '1';
           s.spMin = parseInt(getVal('spMin'), 10) || 0;
           const cdSec = parseFloat(getVal('cooldownSec'));
           s.cooldownMs = isNaN(cdSec) ? (s.cooldownMs || 2000) : Math.round(cdSec * 1000);
@@ -10145,6 +10641,8 @@ function abBuffTimeoutMs() {
           s.intervalMin = parseFloat(getVal('intervalMin')) || 0;
           s.minDistance = parseInt(getVal('minDistance'), 10) || 0;
           s.hpBelowPct = Math.max(0, Math.min(100, parseInt(getVal('hpBelowPct'), 10) || 0));
+          supportTargetUse.clear();
+          resetAutoSupportQueue();
           saveConfigDebounced();
           editingSkillIdx = -1;
           log('✎ แก้ไข skill', s.name);
@@ -10154,6 +10652,26 @@ function abBuffTimeoutMs() {
       // ★ ยกเลิกการแก้ไข
       bodyEl.querySelectorAll('[data-canceledit]').forEach(b => {
         b.onclick = () => { editingSkillIdx = -1; refresh(); };
+      });
+      bodyEl.querySelectorAll('[data-open-support]').forEach(b => {
+        b.onclick = () => {
+          const skillId = Number(b.getAttribute('data-open-support'));
+          const preset = SKILL_PRESETS.find(s => s.buffMode && s.skillId === skillId);
+          if (!preset) return;
+          let index = CFG.skills.findIndex(s => s && s.buffMode && s.skillId === skillId);
+          if (index < 0) {
+            ASSIST.addSkill({
+              ...preset,
+              buffNames: Array.isArray(preset.buffNames) ? [...preset.buffNames] : [],
+              buffIncludeSelf: !!preset.buffIncludeSelf,
+            });
+            index = CFG.skills.findIndex(s => s && s.buffMode && s.skillId === skillId);
+            saveConfigDebounced();
+            log('🤝 เพิ่ม Support:', preset.name);
+          }
+          editingSkillIdx = index;
+          refresh();
+        };
       });
       const addBtn = bodyEl.querySelector('#__assist_skill_addbtn');
       // ★ preset button — เพิ่มจาก database สำเร็จรูป
@@ -10166,7 +10684,8 @@ function abBuffTimeoutMs() {
           const p = SKILL_PRESETS[idx];
           ASSIST.addSkill({
             name: p.name, skillId: p.skillId, level: p.level,
-            targeted: !!p.targeted, ground: !!p.ground, selfCast: !!p.selfCast, ally: !!p.ally,
+            targeted: !!p.targeted, ground: !!p.ground, selfCast: !!p.selfCast, ally: !!p.ally, buffMode: !!p.buffMode,
+            buffNames: Array.isArray(p.buffNames) ? p.buffNames : [], buffIncludeSelf: !!p.buffIncludeSelf,
             intervalMin: p.intervalMin || 0, mobCountMin: p.mobCountMin || 0,
             maxUsesPerTarget: p.maxUsesPerTarget || 1, maxDistance: p.maxDistance || 0,
             minDistance: p.minDistance || 0, spMin: p.spMin || 0, cooldownMs: p.cooldownMs || 2000, hpBelowPct: p.hpBelowPct || 0,
@@ -10190,6 +10709,8 @@ function abBuffTimeoutMs() {
           const intervalMin = parseFloat(bodyEl.querySelector('#__assist_skill_interval').value) || 0;
           const minDistance = parseInt(bodyEl.querySelector('#__assist_skill_mindist').value, 10) || 0;
           const hpBelowPct = Math.max(0, Math.min(100, parseInt(bodyEl.querySelector('#__assist_skill_hpbelow').value, 10) || 0));
+          const buffNames = (bodyEl.querySelector('#__assist_skill_buffnames').value || '').split(',').map(name => name.trim()).filter(Boolean);
+          const buffIncludeSelf = bodyEl.querySelector('#__assist_skill_buffself').value === '1';
           if (isNaN(skillId)) { return; }
           ASSIST.addSkill({
             name, skillId, level,
@@ -10197,6 +10718,7 @@ function abBuffTimeoutMs() {
             ground: mode === 'ground',
             selfCast: mode === 'self',
             ally: mode === 'ally',
+            buffMode: mode === 'buff', buffNames, buffIncludeSelf,
             intervalMin, mobCountMin, maxUsesPerTarget, maxDistance, minDistance, spMin, cooldownMs, hpBelowPct,
           });
           saveConfigDebounced();
@@ -10733,8 +11255,8 @@ function abBuffTimeoutMs() {
             <div class="field"><label>จุดรอ collector: map / X / Y</label><div style="display:flex;gap:6px"><input type="text" id="__assist_lootqueuehomemap" placeholder="prontera"><input type="number" id="__assist_lootqueuehomex" placeholder="150"><input type="number" id="__assist_lootqueuehomey" placeholder="150"></div></div>
             <div class="field"><label>รอหลังรับงานก่อนวาร์ป (ms) — ใช้เฉพาะเมื่ออยู่จุดรอ/เมือง (0=ทันที)</label><input type="number" id="__assist_lootqueueclaimdelay" min="0" max="30000" step="500" placeholder="5000"></div>
             <div class="field"><label>ดีเลย์ก่อนวาร์ป job ถัดไป/กลับจุดรอ (ms) — 0=วาร์ปทันที; ใช้เฉพาะ loot queue</label><input type="number" id="__assist_lootqueuewarpcooldown" min="0" max="10000" step="100" placeholder="0"></div>
-            <div class="field"><label>retry pickup หลังวาร์ป (ครั้ง) — รอผลทีละคำสั่งก่อน retry; นับเพิ่มจากคำสั่งแรก</label><input type="number" id="__assist_lootqueuepickupretries" min="0" max="5" step="1" placeholder="2"></div>
-            <div class="field"><label>รอผล pickup แต่ละครั้ง (ms) — ครบเวลาแล้ว retry; retry ครบจึงทิ้งงาน</label><input type="number" id="__assist_lootqueuetimeout" min="100" max="30000" step="50" placeholder="1000"></div>
+            <div class="field"><label>จำนวนคำสั่ง Pickup รวม (ครั้ง) — 2 รอบแรกไม่เช็ค drop; รอบ 3+ เช็ค drop ก่อนส่ง</label><input type="number" id="__assist_lootqueuepickupretries" min="3" max="6" step="1" placeholder="3"></div>
+            <div class="field"><label>รอผล Pickup แต่ละครั้ง (ms) — ครบเวลาแล้วจึง retry; ครบจำนวนคำสั่งจึงทิ้งงาน</label><input type="number" id="__assist_lootqueuetimeout" min="100" max="30000" step="50" placeholder="1000"></div>
             <div class="btns"><button id="__assist_applylootqueue">บันทึก Loot Queue</button><button id="__assist_lootqueuehomecurrent">ใช้พิกัดปัจจุบันเป็นจุดรอ</button></div>
             <div id="__assist_lootqueuecurrent" style="font-size:10px;color:#9aa0a6;margin:5px 0 4px">ไม่มีงานที่กำลังเก็บ</div>
             <div class="btns"><button id="__assist_lootqueuenext" class="off" disabled title="ไม่มี drop ที่กำลังเก็บ">⏭ ข้ามงานปัจจุบัน</button></div>
@@ -10849,6 +11371,7 @@ function abBuffTimeoutMs() {
             <div class="field"><label>พิกัด Kafra X (ระบบวาร์ปข้าง ๆ +1)</label><input type="number" id="__assist_kafrax" placeholder="0=ใช้ sell"><label style="margin-left:8px">Y</label><input type="number" id="__assist_kafray" placeholder="0=ใช้ sell"><button id="__assist_usekafrapos" style="margin-left:8px;font-size:10px">ใช้พิกัดตัวละคร</button></div>
             <div class="field"><label>เมนู Kafra choice (เริ่มที่ 0 — ตั้งตาม NPC)</label><input type="number" id="__assist_kafrachoice" min="0" max="9" placeholder="0"></div>
             <div class="field"><label>เริ่มฝากเมื่อน้ำหนักถึง % (0=ปิด)</label><input type="number" id="__assist_depositweight" min="0" max="100" step="1" placeholder="90"></div>
+            <div class="field"><label>ระยะห่างการย้ายของ Kafra (ms)</label><input type="number" id="__assist_storagetransfergap" min="50" max="5000" step="10" placeholder="300"><small>ใช้ค่าเดียวกันทั้งฝากเข้าคลังและหยิบของสำรอง ไม่รวมเวลาคุย NPC หรือวาร์ป</small></div>
             <div class="field"><label>โหมดฝากของ</label><select id="__assist_storagedepositmode"><option value="all">ฝากทุกอย่าง — กันของสวม/Weapon Set/Reserve</option><option value="selected">ฝากเฉพาะรายการ</option></select><small>โหมดฝากทุกอย่างจะฝาก stackable ทุกชิ้นที่เกินยอดสำรอง และอุปกรณ์ที่ไม่สวมอยู่เท่านั้น</small></div>
             <div class="field"><label>ไอเท็มสำรองติดตัว (Item ID:จำนวน)</label><input type="text" id="__assist_storagereserve" placeholder="509:50, 656:10"><small>ระบบจะกันยอดนี้ไว้ก่อนฝาก เช่น White Herb 50, Awakening Potion 10</small></div>
             <div class="btns"><button id="__assist_applykafra">ใช้ค่า storage</button><button id="__assist_managedeposititems">📋 รายการฝากเฉพาะ</button><button id="__assist_t_depfull" class="on">ฝากเมื่อเต็ม/ถึงน้ำหนัก</button><button id="__assist_t_depaftersell" class="on">ฝากหลังขาย</button></div>
@@ -11442,12 +11965,14 @@ function abBuffTimeoutMs() {
       const ky = parseInt(root.querySelector('#__assist_kafray').value, 10);
       const kc = parseInt(root.querySelector('#__assist_kafrachoice').value, 10);
       const weightPct = parseInt(root.querySelector('#__assist_depositweight').value, 10);
+      const transferGapMs = parseInt(root.querySelector('#__assist_storagetransfergap').value, 10);
       const reserveText = root.querySelector('#__assist_storagereserve').value;
       ASSIST.setStorageDepositMode(root.querySelector('#__assist_storagedepositmode').value);
       if (kn) ASSIST.setKafra(kn, km);
       if (!isNaN(kx) && !isNaN(ky)) ASSIST.setKafraPos(kx, ky);
       if (!isNaN(kc)) CFG.kafraChoice = kc;
       if (!isNaN(weightPct)) ASSIST.setDepositWeightPercent(weightPct);
+      if (!isNaN(transferGapMs)) ASSIST.setStorageTransferGapMs(transferGapMs);
       const reserves = parseStorageReserveItems(reserveText);
       if (reserves == null) log('⚠️ รูปแบบไอเท็มสำรองไม่ถูกต้อง — ใช้ ItemID:จำนวน เช่น 509:50, 656:10');
       else ASSIST.setStorageReserveItems(reserves);
@@ -12273,7 +12798,7 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     });
     for (const [sel, value] of [
       ['#__assist_lootqueuelocalurl', CFG.lootQueueLocalUrl], ['#__assist_lootqueuecloudflareurl', CFG.lootQueueCloudflareUrl], ['#__assist_lootqueuegroup', CFG.lootQueueGroup],
-      ['#__assist_lootqueuehomemap', CFG.lootQueueHomeMap], ['#__assist_lootqueuehomex', CFG.lootQueueHomeX], ['#__assist_lootqueuehomey', CFG.lootQueueHomeY], ['#__assist_lootqueueclaimdelay', CFG.lootQueueClaimDelayMs], ['#__assist_lootqueuewarpcooldown', CFG.lootQueueWarpCooldownMs], ['#__assist_lootqueuepickupretries', CFG.lootQueuePickupRetryCount], ['#__assist_lootqueuetimeout', CFG.lootQueueActionTimeoutMs],
+      ['#__assist_lootqueuehomemap', CFG.lootQueueHomeMap], ['#__assist_lootqueuehomex', CFG.lootQueueHomeX], ['#__assist_lootqueuehomey', CFG.lootQueueHomeY], ['#__assist_lootqueueclaimdelay', CFG.lootQueueClaimDelayMs], ['#__assist_lootqueuewarpcooldown', CFG.lootQueueWarpCooldownMs], ['#__assist_lootqueuepickupretries', lootQueuePickupAttemptLimit(CFG.lootQueuePickupRetryCount)], ['#__assist_lootqueuetimeout', CFG.lootQueueActionTimeoutMs],
     ]) syncInput(sel, value);
     const lootQueueStatusEl = root.querySelector('#__assist_lootqueuestatus');
     if (lootQueueStatusEl) {
@@ -12360,12 +12885,30 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
         const spStr = sp.cur != null ? (sp.max ? ` | SP ${sp.cur}/${sp.max}` : ` | SP ${sp.cur}`) : '';
         skCdEl.innerHTML = states.map(c => {
           let state;
-          if (c.statusBacked) {
+          if (c.support) {
+            const parts = [];
+            if (c.queuedNames.length) parts.push('<span style="color:#8ab4f8">คิว: ' + c.queuedNames.join(', ') + '</span>');
+            if (c.pendingNames.length) parts.push('<span style="color:#8ab4f8">รอยืนยัน server: ' + c.pendingNames.join(', ') + '</span>');
+            if (c.retryNames.length) parts.push('<span style="color:#f39c12">รอลองใหม่: ' + c.retryNames.join(', ') + '</span>');
+            if (c.readyNames.length) parts.push('<span style="color:#27ae60">พร้อม: ' + c.readyNames.join(', ') + '</span>');
+            if (c.activeNames.length) parts.push('<span style="color:#27ae60">มีบัพ: ' + c.activeNames.join(', ') + '</span>');
+            if (c.cooldownNames.length) parts.push('<span style="color:#f39c12">รอรายชื่อ: ' + c.cooldownNames.join(', ') + '</span>');
+            if (c.hpWaitNames.length) parts.push('<span style="color:#f39c12">รอ HP: ' + c.hpWaitNames.join(', ') + '</span>');
+            if (c.unavailableNames.length) parts.push('<span style="color:#9aa0a6">ไม่เห็น/ไกล: ' + c.unavailableNames.join(', ') + '</span>');
+            state = parts.length ? parts.join(' · ') : '<span style="color:#9aa0a6">ยังไม่ตั้งชื่อเป้าหมาย</span>';
+          } else if (c.statusBacked) {
             state = c.active ? '<span style="color:#27ae60">มีบัพ</span>'
               : c.pending ? '<span style="color:#8ab4f8">รอยืนยัน server</span>'
               : '<span style="color:#f39c12">ไม่มีบัพ</span>';
           } else {
-            state = c.remainingMs <= 0 ? '<span style="color:#27ae60">พร้อม</span>' : '<span style="color:#f39c12">รอ cooldown</span>';
+            if (c.remainingMs <= 0) state = '<span style="color:#27ae60">พร้อม</span>';
+            else {
+              const remainingSec = Math.ceil(c.remainingMs / 1000);
+              const remaining = remainingSec >= 60
+                ? Math.floor(remainingSec / 60) + 'นาที' + (remainingSec % 60 ? ' ' + (remainingSec % 60) + 's' : '')
+                : remainingSec + 's';
+              state = '<span style="color:#f39c12">รอ ' + remaining + '</span>';
+            }
           }
           return `<div>🔮 ${c.name} <span style="color:#5f6368">(#${c.skillId})</span> → ${state}</div>`;
         }).join('') + `<div style="color:#5f6368;margin-top:2px">${spStr}</div>`;
@@ -12483,6 +13026,7 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     syncInput('#__assist_kafray', CFG.kafraMapY);
     syncInput('#__assist_kafrachoice', CFG.kafraChoice);
     syncInput('#__assist_depositweight', CFG.depositWeightPercent);
+    syncInput('#__assist_storagetransfergap', storageTransferGapMs());
     const storageMode = root.querySelector('#__assist_storagedepositmode');
     if (storageMode && !isEditing(storageMode)) storageMode.value = storageDepositMode();
     syncInput('#__assist_storagereserve', storageReserveItemsText());
