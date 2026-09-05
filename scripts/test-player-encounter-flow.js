@@ -68,6 +68,57 @@ assert.deepStrictEqual(whitelist.observe({
   windowMs: 10000,
 }), { action: 'whitelist', name: 'TrustedFriend' }, 'whitelisted players must enter the conversation flow');
 
+const ignored = createPlayerEncounterTracker();
+assert.deepStrictEqual(ignored.observe({
+  id: 304,
+  name: 'IgnoredFriend',
+  distance: 2,
+  ignored: true,
+  whitelisted: true,
+  now: 0,
+  windowMs: 10000,
+}), { action: 'ignore', name: 'IgnoredFriend' },
+'ignore whitelist must win over conversation whitelist and produce no Player Encounter flow');
+
+const ignoredCommands = [];
+const ignoredController = createPlayerEncounterController({
+  getConfig: () => ({ repeatWindowSec: 10 }),
+  actions: {
+    flee: () => ignoredCommands.push('flee'),
+    warpTown: () => ignoredCommands.push('warpTown'),
+    sit: () => ignoredCommands.push('sit'),
+  },
+});
+assert.deepStrictEqual(ignoredController.observePlayer({
+  id: 305, name: 'IgnoredFriend', distance: 2, ignored: true, whitelisted: true, now: 0,
+}), { action: 'ignore', name: 'IgnoredFriend' });
+assert.strictEqual(ignoredController.status(0).state, 'IDLE');
+assert.deepStrictEqual(ignoredCommands, [], 'ignore whitelist must not trigger any command');
+
+const separateDelayCommands = [];
+const separateDelayController = createPlayerEncounterController({
+  getConfig: () => ({
+    repeatWindowSec: 10,
+    conversationDelaySec: 7,
+    whitelistDelaySec: 1,
+    repeatTownRestSec: 300,
+    townMap: 'prontera',
+    farmMap: 'mjolnir_03',
+  }),
+  actions: {
+    sit: () => separateDelayCommands.push('sit'),
+    stand: () => separateDelayCommands.push('stand'),
+    warpTown: () => separateDelayCommands.push('warpTown'),
+  },
+});
+separateDelayController.observePlayer({ id: 306, name: 'TalkFriend', distance: 2, whitelisted: true, now: 0 });
+separateDelayController.tick({ now: 0, workPending: false, conversationActive: false });
+separateDelayController.tick({ now: 6999, workPending: false, conversationActive: false });
+assert.deepStrictEqual(separateDelayCommands, ['sit'], 'normal Flee delay must not control Conversation Whitelist');
+separateDelayController.tick({ now: 7000, workPending: false, conversationActive: false });
+assert.deepStrictEqual(separateDelayCommands, ['sit', 'stand', 'warpTown'],
+  'Conversation Whitelist must use its own editable delay');
+
 const afterWarp = createPlayerEncounterTracker();
 assert.strictEqual(afterWarp.observe({ id: 404, name: 'Chaser', distance: 3, now: 0, windowMs: 10000 }).count, 1);
 afterWarp.clearPresence();
@@ -90,7 +141,7 @@ const controller = createPlayerEncounterController({
   getConfig: () => ({
     repeatWindowSec: 10,
     repeatTownRestSec: 300,
-    whitelistDelaySec: 4,
+    conversationDelaySec: 4,
     whitelistTownRestSec: 30,
     townMap: 'prontera',
     farmMap: 'mjolnir_03',
@@ -127,7 +178,7 @@ assert.strictEqual(controller.status(3000).state, 'IDLE');
 
 const whitelistCommands = [];
 const whitelistController = createPlayerEncounterController({
-  getConfig: () => ({ repeatWindowSec: 10, repeatTownRestSec: 300, whitelistDelaySec: 4, whitelistTownRestSec: 30, townMap: 'prontera', farmMap: 'mjolnir_03' }),
+  getConfig: () => ({ repeatWindowSec: 10, repeatTownRestSec: 300, conversationDelaySec: 4, whitelistTownRestSec: 30, townMap: 'prontera', farmMap: 'mjolnir_03' }),
   actions: {
     flee: () => whitelistCommands.push(['flee']),
     warpTown: () => whitelistCommands.push(['warpTown']),

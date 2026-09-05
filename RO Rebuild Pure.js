@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.2.2
+// @version      1.3.0
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -354,6 +354,7 @@ const RO_PURE_CORE = (() => {
 
       const now = Number.isFinite(Number(event.now)) ? Number(event.now) : Date.now();
       const windowMs = Math.max(0, Number(event.windowMs) || 0);
+      if (event.ignored) return { action: 'ignore', name: displayName };
       if (event.whitelisted) return { action: 'whitelist', name: displayName };
       if (!key) return { action: 'flee', name: '', count: null };
       const previous = arrivalsByPlayer.get(key) || [];
@@ -394,7 +395,7 @@ const RO_PURE_CORE = (() => {
     };
     const config = () => getConfig() || {};
     const repeatWindowMs = () => Math.max(0, Number(config().repeatWindowSec) || 0) * 1000;
-    const whitelistDelayMs = () => Math.max(0, Number(config().whitelistDelaySec) || 0) * 1000;
+    const conversationDelayMs = () => Math.max(0, Number(config().conversationDelaySec) || 0) * 1000;
     const townRestMs = () => {
       const cfg = config();
       const rawWhitelistSeconds = cfg.whitelistTownRestSec;
@@ -418,6 +419,7 @@ const RO_PURE_CORE = (() => {
       if (state !== 'IDLE' && state !== 'WHITELIST_WORK' && state !== 'WHITELIST_DELAY') return { action: 'none' };
       const result = tracker.observe({ ...event, windowMs: repeatWindowMs() });
       if (result.action === 'none') return result;
+      if (result.action === 'ignore') return result;
       if (result.action === 'whitelist') {
         if (state === 'IDLE') {
           state = 'WHITELIST_WORK';
@@ -448,7 +450,7 @@ const RO_PURE_CORE = (() => {
       if (state === 'WHITELIST_WORK') {
         if (context.workPending || context.conversationActive) return { owned: false, state };
         command('sit');
-        deadlineAt = now + whitelistDelayMs();
+        deadlineAt = now + conversationDelayMs();
         state = 'WHITELIST_DELAY';
         return { owned: true, state };
       }
@@ -545,7 +547,7 @@ if (typeof window !== 'undefined') {
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.2.2';
+  const VERSION = '1.3.0';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -561,7 +563,7 @@ if (typeof window !== 'undefined') {
     'combatEnabled', 'targetWhitelist', 'targetBlacklist', 'attackRange', 'rangedAttackRange', 'attackProbeMs', 'hiddenWaitMonsters', 'hiddenWaitSec', 'hiddenSightEnabled',
     'maxAcquireDistance', 'searchRadii', 'maxChaseDistance', 'antiKS', 'antiKSCooldownMs', 'avoidOtherPlayers', 'playerProximityRadius', 'postWarpTargetSettleMs', 'combatGatProgressTimeoutMs', 'targetLowestHpFirst',
     'weaponSetEnabled', 'weaponSets', 'weaponDefaultSetId', 'weaponMonsterRules',
-    'fleeOnMobCount', 'fleeOnAggroCount', 'fleeOnProximityCount', 'fleeOnProximityRadius', 'fleeMonsters', 'fleeMonsterRadius', 'fleeOnPlayerCount', 'fleeOnPlayerRadius', 'fleeOnPlayerDelaySec', 'fleePlayerExceptions', 'fleePlayerRepeatWindowSec', 'fleePlayerRepeatTownRestSec', 'fleePlayerWhitelistTownRestSec', 'fleeOnMvp', 'fleeOnMvpRadius', 'maxEngageSecSlow', 'slowMonsterSubIds',
+    'fleeOnMobCount', 'fleeOnAggroCount', 'fleeOnProximityCount', 'fleeOnProximityRadius', 'fleeMonsters', 'fleeMonsterRadius', 'fleeOnPlayerCount', 'fleeOnPlayerRadius', 'fleeOnPlayerDelaySec', 'fleePlayerIgnorePatterns', 'fleePlayerExceptions', 'fleePlayerConversationDelaySec', 'fleePlayerRepeatWindowSec', 'fleePlayerRepeatTownRestSec', 'fleePlayerWhitelistTownRestSec', 'fleeOnMvp', 'fleeOnMvpRadius', 'maxEngageSecSlow', 'slowMonsterSubIds',
     'wanderEnabled', 'warpFindEnabled', 'noMonsterWarpSec', 'warpToMonster', 'warpToMonsterMaxPerEntity', 'stuckWarpOnAbandon', 'warpToBoss',
     'restEnabled', 'restHpPercent', 'restUntilPercent', 'restMaxSec', 'postCombatDelayMs', 'autoRespawnEnabled', 'autoRespawnDelayMs', 'telegramAlertCard', 'telegramAlertFlee', 'telegramAlertBotMention', 'telegramAlertNearby', 'telegramAlertWhisper', 'telegramBotToken', 'telegramChatId',
     'sellEnabled', 'sellNpcName', 'sellNpcMap', 'sellNpcX', 'sellNpcY', 'sellIntervalMin', 'sellOnFull', 'sellItemIds',
@@ -990,8 +992,10 @@ if (typeof window !== 'undefined') {
     fleeMonsterRadius: 20,        // ★ ระยะ (ช่อง) ที่ถ้าเจอมอนใน fleeMonsters → วาร์ปหนี
     fleeOnPlayerCount: 1,         // พบผู้เล่นอื่น N คนในระยะ → วาร์ปหนี (0=off)
     fleeOnPlayerRadius: 30,       // รัศมีตรวจผู้เล่นอื่น (ช่อง)
-    fleeOnPlayerDelaySec: 4,      // พบผู้เล่นแล้วรอก่อนวาร์ป (0=ทันที)
-    fleePlayerExceptions: [],     // whitelist: ไม่หนี และใช้ flow สนทนา/จบงานก่อนกลับเมือง
+    fleeOnPlayerDelaySec: 4,      // พบผู้เล่นทั่วไปแล้วรอก่อนวาร์ป (0=ทันที)
+    fleePlayerIgnorePatterns: [], // Ignore whitelist: ไม่ทำ Flee/สนทนา/กลับเมือง
+    fleePlayerExceptions: [],     // Conversation whitelist (คง key เดิมเพื่อรองรับค่าที่ผู้ใช้บันทึกไว้)
+    fleePlayerConversationDelaySec: 4, // หลังจบงาน/สนทนา รอก่อนกลับเมือง (0=ทันที)
     fleePlayerRepeatWindowSec: 10, // ผู้เล่นคนเดิมโผล่ใกล้ 3 ครั้งภายในช่วงนี้ → กลับเมือง
     fleePlayerRepeatTownRestSec: 300, // เวลาพักเมืองเมื่อถูกผู้เล่นคนเดิมตามซ้ำ
     fleePlayerWhitelistTownRestSec: null, // เวลาพักเมืองของ whitelist; ว่าง = ใช้ค่าพักตามซ้ำ
@@ -1604,6 +1608,7 @@ if (typeof window !== 'undefined') {
     if (sender === playerId || (playerName && name === playerName)) return false;
     const other = entities.get(sender);
     if (!other || other.kind !== 0 || other.x == null || other.y == null || player.x == null || player.y == null) return null;
+    if (isFleePlayerIgnored(other)) return null;
     // packet chat มีชื่อ และ entity มีชื่อ: ถ้าทั้งคู่มี ต้องตรงกัน เพื่อกัน sender/id mapping เก่าหรือผิดตัว
     if (name && other.name && String(name).trim().toLowerCase() !== String(other.name).trim().toLowerCase()) return null;
     const radius = Math.max(1, Math.min(50, Number(CFG.aiReplyRadius) || 10));
@@ -6109,7 +6114,7 @@ if (typeof window !== 'undefined') {
     return {
       repeatWindowSec: CFG.fleePlayerRepeatWindowSec,
       repeatTownRestSec: CFG.fleePlayerRepeatTownRestSec,
-      whitelistDelaySec: CFG.fleeOnPlayerDelaySec,
+      conversationDelaySec: CFG.fleePlayerConversationDelaySec,
       whitelistTownRestSec: CFG.fleePlayerWhitelistTownRestSec,
       townMap: CFG.kafraMap,
       farmMap: CFG.farmMap,
@@ -6565,6 +6570,9 @@ if (typeof window !== 'undefined') {
   function isFleePlayerException(entity) {
     return RO_PURE_CORE.matchesPlayerWhitelist(entity?.name, CFG.fleePlayerExceptions);
   }
+  function isFleePlayerIgnored(entity) {
+    return RO_PURE_CORE.matchesPlayerWhitelist(entity?.name, CFG.fleePlayerIgnorePatterns);
+  }
   // ผู้เล่นจาก minimap marker อาจไม่มีชื่อ จึงห้ามใช้ชื่อเป็นเงื่อนไข
   function countOtherPlayers(radius) {
     if (player.x == null) return 0;
@@ -6573,7 +6581,7 @@ if (typeof window !== 'undefined') {
     for (const e of entities.values()) {
       if (e.kind !== 0 || !e.alive || e.id === playerId || e.x == null || e.y == null) continue;
       if (isStaleId(e.id, now)) continue;
-      if (isFleePlayerException(e)) continue;
+      if (isFleePlayerIgnored(e) || isFleePlayerException(e)) continue;
       if (Math.hypot(e.x - player.x, e.y - player.y) <= radius) n++;
     }
     return n;
@@ -7781,20 +7789,23 @@ function abBuffTimeoutMs() {
     if (shouldHoldFleePlayerForAbBuff() || shouldHoldFleePlayerForStorage() || isOreRefineActive()) return;
     if (player.x == null || player.y == null) return;
     const distance = Math.hypot(e.x - player.x, e.y - player.y);
+    const ignored = isFleePlayerIgnored(e);
     const encounter = playerEncounter.observePlayer({
       id: e.id,
       name: e.name,
       distance,
-      whitelisted: isFleePlayerException(e),
+      ignored,
+      whitelisted: !ignored && isFleePlayerException(e),
       now: nowMs(),
     });
+    if (ignored || encounter.action === 'ignore') return;
     if (encounter.action === 'whitelist') {
       log('💬 Player Whitelist:', encounter.name || e.id.toString(16), 'โผล่ใกล้ ' + distance.toFixed(1) + ' ช่อง → จบงานและรอสนทนา');
       return;
     }
     if (encounter.action === 'flee' || encounter.action === 'retreat') return;
     const radius = CFG.fleeOnPlayerRadius || 10;
-    if (distance > radius || isFleePlayerException(e)) return;
+    if (distance > radius || isFleePlayerIgnored(e) || isFleePlayerException(e)) return;
     fleePlayersIfNeeded(' (⚡ ทันที)');
   }
 
@@ -10542,10 +10553,22 @@ function abBuffTimeoutMs() {
       CFG.fleePlayerExceptions = [...new Set(names.map(name => String(name || '').trim()).filter(Boolean))];
       resetFleePlayerDelay();
       saveConfigDebounced();
-      log('👤 Player Whitelist =', CFG.fleePlayerExceptions.length ? CFG.fleePlayerExceptions.join(', ') : '(ไม่มี)');
+      log('💬 Conversation Whitelist =', CFG.fleePlayerExceptions.length ? CFG.fleePlayerExceptions.join(', ') : '(ไม่มี)');
       return CFG.fleePlayerExceptions;
     },
+    setFleePlayerIgnorePatterns(...patterns) {
+      CFG.fleePlayerIgnorePatterns = [...new Set(patterns.map(pattern => String(pattern || '').trim()).filter(Boolean))];
+      resetFleePlayerDelay();
+      saveConfigDebounced();
+      log('🙈 Ignore Whitelist =', CFG.fleePlayerIgnorePatterns.length ? CFG.fleePlayerIgnorePatterns.join(', ') : '(ไม่มี)');
+      return CFG.fleePlayerIgnorePatterns;
+    },
     setPlayerEncounterTimes(values = {}) {
+      if (Object.prototype.hasOwnProperty.call(values, 'conversationDelaySec')) {
+        const value = Number(values.conversationDelaySec);
+        if (!Number.isFinite(value)) return false;
+        CFG.fleePlayerConversationDelaySec = Math.max(0, Math.min(300, value));
+      }
       if (Object.prototype.hasOwnProperty.call(values, 'repeatWindowSec')) {
         const value = Number(values.repeatWindowSec);
         if (!Number.isFinite(value)) return false;
@@ -10566,9 +10589,10 @@ function abBuffTimeoutMs() {
         }
       }
       saveConfigDebounced();
-      log('👤 Player Encounter เวลา:', 'window=' + CFG.fleePlayerRepeatWindowSec + 's',
+      log('👤 Player Encounter เวลา:', 'ดีเลย์สนทนา=' + CFG.fleePlayerConversationDelaySec + 's',
+        'window=' + CFG.fleePlayerRepeatWindowSec + 's',
         'พักตามซ้ำ=' + CFG.fleePlayerRepeatTownRestSec + 's',
-        'พัก whitelist=' + (CFG.fleePlayerWhitelistTownRestSec == null ? 'ใช้ค่าตามซ้ำ' : CFG.fleePlayerWhitelistTownRestSec + 's'));
+        'พัก Conversation=' + (CFG.fleePlayerWhitelistTownRestSec == null ? 'ใช้ค่าตามซ้ำ' : CFG.fleePlayerWhitelistTownRestSec + 's'));
       return true;
     },
     playerEncounterStatus() { return playerEncounter.status(); },
@@ -12038,11 +12062,13 @@ function abBuffTimeoutMs() {
             <h4>👤 Flee ผู้เล่น</h4>
             <div class="btns"><button id="__assist_t_fleeplayer" class="off">Flee Player: OFF</button></div>
             <div class="field"><label>ระยะตรวจผู้เล่น (ช่อง)</label><input type="number" id="__assist_fleeplayerradius" min="1" max="50" placeholder="30"></div>
-            <div class="field"><label>ดีเลย์วาร์ปปกติ / whitelist หลังจบงาน (วินาที, 0=ทันที)</label><input type="number" id="__assist_fleeplayerdelay" min="0" max="300" step="0.5" placeholder="4"></div>
-            <div class="field"><label>Player Whitelist (Regex) — ไม่หนีและเข้าสู่ flow สนทนา (คั่นด้วยจุลภาค)</label><input type="text" id="__assist_fleeplayerexceptions" placeholder="เช่น ^FriendA$, ^test.*"></div>
+            <div class="field"><label>ดีเลย์วาร์ปหนีผู้เล่นทั่วไป (วินาที, 0=ทันที)</label><input type="number" id="__assist_fleeplayerdelay" min="0" max="300" step="0.5" placeholder="4"></div>
+            <div class="field"><label>Ignore Whitelist (Regex) — ไม่ทำอะไรเลย (คั่นด้วยจุลภาค)</label><input type="text" id="__assist_fleeplayerignorepatterns" placeholder="เช่น ^FriendA$, ^safe.*"></div>
+            <div class="field"><label>Conversation Whitelist (Regex) — ตอบ/จบงานแล้วกลับเมือง</label><input type="text" id="__assist_fleeplayerexceptions" placeholder="เช่น ^sexyja$, ^test.*"></div>
+            <div class="field"><label>ดีเลย์ Conversation หลังจบงาน/สนทนาก่อนกลับเมือง (วินาที)</label><input type="number" id="__assist_fleeplayerconversationdelay" min="0" max="300" step="0.5" placeholder="4"></div>
             <div class="field"><label>ช่วงนับผู้เล่นคนเดิมโผล่ใกล้ 5 ช่อง (วินาที)</label><input type="number" id="__assist_fleeplayerrepeatwindow" min="1" max="300" step="1" placeholder="10"></div>
             <div class="field"><label>พักเมืองเมื่อผู้เล่นคนเดิมโผล่ครบครั้งที่ 3 (วินาที)</label><input type="number" id="__assist_fleeplayerrepeattownrest" min="0" max="86400" step="30" placeholder="300"></div>
-            <div class="field"><label>พักเมืองของ whitelist (วินาที; เว้นว่าง = ใช้ค่าด้านบน)</label><input type="number" id="__assist_fleeplayerwhitelisttownrest" min="0" max="86400" step="30" placeholder="ใช้ค่าพักตามซ้ำ"></div>
+            <div class="field"><label>พักเมืองของ Conversation Whitelist (วินาที; เว้นว่าง = ใช้ค่าด้านบน)</label><input type="number" id="__assist_fleeplayerwhitelisttownrest" min="0" max="86400" step="30" placeholder="ใช้ค่าพักตามซ้ำ"></div>
             <div id="__assist_playerencounterstatus" style="font-size:10px;color:#9aa0a6;margin:5px 0">Player Encounter: IDLE</div>
             <div class="btns"><button id="__assist_playerencounterskiprest" class="off" disabled>⏭ เลิกพักและกลับฟาร์ม</button></div>
             <h4>👑 Flee MVP / Boss</h4>
@@ -12619,12 +12645,16 @@ function abBuffTimeoutMs() {
       if (!isNaN(fpr)) ASSIST.setFleePlayers(CFG.fleeOnPlayerCount, fpr);
       const fpd = parseFloat(root.querySelector('#__assist_fleeplayerdelay').value);
       if (!isNaN(fpd)) ASSIST.setFleePlayerDelay(fpd);
+      const ignoreList = root.querySelector('#__assist_fleeplayerignorepatterns').value;
+      ASSIST.setFleePlayerIgnorePatterns(...ignoreList.split(',').map(s => s.trim()).filter(Boolean));
       const fpeList = root.querySelector('#__assist_fleeplayerexceptions').value;
       ASSIST.setFleePlayerExceptions(...fpeList.split(',').map(s => s.trim()).filter(Boolean));
       const encounterTimes = {};
+      const conversationDelay = root.querySelector('#__assist_fleeplayerconversationdelay').value.trim();
       const repeatWindow = root.querySelector('#__assist_fleeplayerrepeatwindow').value.trim();
       const repeatTownRest = root.querySelector('#__assist_fleeplayerrepeattownrest').value.trim();
       const whitelistTownRest = root.querySelector('#__assist_fleeplayerwhitelisttownrest').value.trim();
+      if (conversationDelay !== '') encounterTimes.conversationDelaySec = conversationDelay;
       if (repeatWindow !== '') encounterTimes.repeatWindowSec = repeatWindow;
       if (repeatTownRest !== '') encounterTimes.repeatTownRestSec = repeatTownRest;
       encounterTimes.whitelistTownRestSec = whitelistTownRest;
@@ -13722,7 +13752,9 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     syncInput('#__assist_fleeprox', CFG.fleeOnProximityCount);
     syncInput('#__assist_fleeplayerradius', CFG.fleeOnPlayerRadius);
     syncInput('#__assist_fleeplayerdelay', CFG.fleeOnPlayerDelaySec);
+    syncInput('#__assist_fleeplayerignorepatterns', (CFG.fleePlayerIgnorePatterns || []).join(','));
     syncInput('#__assist_fleeplayerexceptions', (CFG.fleePlayerExceptions || []).join(','));
+    syncInput('#__assist_fleeplayerconversationdelay', CFG.fleePlayerConversationDelaySec);
     syncInput('#__assist_fleeplayerrepeatwindow', CFG.fleePlayerRepeatWindowSec);
     syncInput('#__assist_fleeplayerrepeattownrest', CFG.fleePlayerRepeatTownRestSec);
     syncInput('#__assist_fleeplayerwhitelisttownrest', CFG.fleePlayerWhitelistTownRestSec == null ? '' : CFG.fleePlayerWhitelistTownRestSec);
