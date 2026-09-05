@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.1.10
+// @version      1.2.2
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -117,6 +117,427 @@
      909 = Jellopy,       512 = Apple
    ========================================================================== */
 
+const RO_PURE_CORE = (() => {
+  const normalizePlayerName = (name) => String(name || '').split('\0')[0].trim().toLocaleLowerCase();
+
+  function matchesPlayerWhitelist(name, patterns) {
+    const displayName = String(name || '').split('\0')[0].trim();
+    const normalizedName = normalizePlayerName(displayName);
+    if (!normalizedName || !Array.isArray(patterns)) return false;
+    return patterns.some(entry => {
+      const pattern = String(entry || '').trim();
+      if (!pattern) return false;
+      try { return new RegExp(pattern, 'i').test(displayName); }
+      catch (_) { return normalizePlayerName(pattern) === normalizedName; }
+    });
+  }
+
+  function shouldHoldPlayerFleeForEncounter(state) {
+    return !!state && state !== 'IDLE' && state !== 'WHITELIST_WORK';
+  }
+
+  function createBotActivityReporter() {
+    let current = null;
+    let activitySince = 0;
+    let progressAt = 0;
+    let progressKey = '';
+
+    function update(context = {}) {
+      const now = Number.isFinite(Number(context.now)) ? Number(context.now) : Date.now();
+      const seconds = ms => (Math.max(0, Number(ms) || 0) / 1000).toFixed(1) + 's';
+      let next;
+      if (!context.masterEnabled) {
+        next = { code: 'PAUSED', label: 'Bot หยุดชั่วคราว', detail: 'กด BOT: ON เพื่อเริ่ม automation', blocker: '', tone: 'idle', progressKey: 'paused' };
+      } else if (context.dead) {
+        next = context.autoRespawnEnabled
+          ? { code: 'DEAD_RESPAWN', label: 'ตัวละครตาย', detail: 'รอเกิดใหม่ ' + seconds(context.respawnRemainingMs), blocker: 'ทุกงานหยุดรอ Auto-Respawn', tone: 'danger', progressKey: 'dead:' + Math.ceil((Number(context.respawnRemainingMs) || 0) / 1000) }
+          : { code: 'DEAD', label: 'ตัวละครตาย', detail: 'Auto-Respawn ปิดอยู่', blocker: 'ทุกงานหยุดรอการเกิดใหม่', tone: 'danger', progressKey: 'dead' };
+      } else if (!context.socketConnected) {
+        next = { code: 'DISCONNECTED', label: 'ไม่ได้เชื่อมต่อเกม', detail: 'รอ Game WebSocket', blocker: 'ทุกงานรอการเชื่อมต่อ', tone: 'danger', progressKey: 'disconnected' };
+      } else if (context.collector?.busy) {
+        const collector = context.collector;
+        const stageLabels = {
+          'claim': 'กำลังรับงาน', 'claim-delay': 'รอรวมรายการ', 'warp': 'กำลังวาร์ปไปหา',
+          'pickup': 'กำลังส่งคำสั่งเก็บ', 'pickup-wait': 'รอผลเก็บของ', 'return-home': 'กำลังกลับจุดรอ',
+        };
+        const rawStage = String(collector.stage || '');
+        const stageKey = stageLabels[rawStage] ? rawStage
+          : Object.keys(stageLabels).sort((a, b) => b.length - a.length).find(key => rawStage.startsWith(key + ':') || rawStage.startsWith(key + '-'));
+        const parts = [collector.itemName || 'รายการที่รับมา', stageLabels[stageKey] || rawStage || 'กำลังทำงาน'];
+        if (collector.attempts && collector.limit) parts.push('ครั้งที่ ' + collector.attempts + '/' + collector.limit);
+        next = {
+          code: 'LOOT_QUEUE', label: 'กำลังไปเก็บของจาก Loot Queue', detail: parts.join(' · '),
+          blocker: 'Combat และงานรองรอ Loot Queue', tone: 'active', progressKey: collector.progressKey || parts.join('|'),
+        };
+      } else if (context.playerEncounter && context.playerEncounter.state !== 'IDLE') {
+        const encounter = context.playerEncounter;
+        const labels = {
+          WHITELIST_WORK: 'จัดการงานเดิมก่อนคุยกับผู้เล่น',
+          WHITELIST_DELAY: 'นั่งรอก่อนกลับเมือง',
+          WARP_TOWN: 'กำลังวาร์ปกลับเมือง',
+          TOWN_REST: 'พักในเมืองหลังพบผู้เล่น',
+          RETURN_FARM: 'กำลังกลับแมปฟาร์ม',
+        };
+        const parts = [];
+        if (encounter.playerName) parts.push(encounter.playerName);
+        if (encounter.count) parts.push('ครั้งที่ ' + encounter.count + '/3');
+        if (encounter.workLabel) parts.push(encounter.workLabel);
+        if (encounter.remainingMs > 0) parts.push('เหลือ ' + seconds(encounter.remainingMs));
+        next = {
+          code: 'PLAYER_ENCOUNTER', label: labels[encounter.state] || 'Player Encounter กำลังทำงาน',
+          detail: parts.join(' · '), blocker: 'ระบบฟาร์มรอ Player Encounter',
+          tone: /DELAY|REST/.test(encounter.state) ? 'waiting' : 'active',
+          progressKey: encounter.progressKey || encounter.state + ':' + Math.ceil((Number(encounter.remainingMs) || 0) / 1000),
+        };
+      } else if (context.flee?.active) {
+        const flee = context.flee;
+        next = {
+          code: 'FLEE_PLAYER', label: flee.deferredForLoot ? 'พบผู้เล่น แต่เก็บของให้เสร็จก่อน' : 'เตรียมวาร์ปหนีผู้เล่น',
+          detail: flee.remainingMs > 0 ? 'เหลือ ' + seconds(flee.remainingMs) : 'พร้อมวาร์ป',
+          blocker: 'Combat และการเดินถูกหยุดเพื่อความปลอดภัย', tone: 'waiting',
+          progressKey: flee.deferredForLoot ? 'defer:' + (flee.queueSize || 0) : 'delay',
+        };
+      } else if (context.ai?.active) {
+        const ai = context.ai;
+        const aiLabels = { FINISH_COMBAT: 'จัดการมอนเดิมก่อนตอบผู้เล่น', WAIT_REPLY: 'กำลังรอตอบผู้เล่น', HOLD: 'กำลังสนทนากับผู้เล่น' };
+        next = {
+          code: 'AI_CHAT', label: aiLabels[ai.phase] || 'AI Chat กำลังทำงาน',
+          detail: ai.speaker || '', blocker: ai.phase === 'FINISH_COMBAT' ? '' : 'การหามอนใหม่รอให้สนทนาจบ',
+          tone: ai.phase === 'WAIT_REPLY' ? 'waiting' : 'active', progressKey: ai.progressKey || ai.phase,
+        };
+      } else if (context.teleport?.active) {
+        const teleport = context.teleport;
+        next = {
+          code: 'TELEPORT', label: 'รอยืนยันวาร์ป',
+          detail: (teleport.map || '?') + (teleport.remainingMs > 0 ? ' · timeout ใน ' + seconds(teleport.remainingMs) : ''),
+          blocker: 'งานที่ใช้ตำแหน่งรอ Game Packet ยืนยัน', tone: 'waiting',
+          progressKey: [teleport.map, teleport.x, teleport.y, teleport.reason].join(':'),
+        };
+      } else if (context.wrongFarmMap) {
+        next = {
+          code: 'RETURN_FARM', label: 'อยู่นอกแมปฟาร์ม',
+          detail: (context.currentMap || '?') + ' → ' + (context.farmMap || '?'), blocker: 'Combat รอกลับแมปฟาร์ม',
+          tone: 'waiting', progressKey: 'map:' + (context.currentMap || '?'),
+        };
+      } else if (context.rest?.active) {
+        const rest = context.rest;
+        next = {
+          code: 'REST', label: rest.postRespawn ? 'พักฟื้นหลังเกิดใหม่' : 'กำลังนั่งพัก',
+          detail: 'HP ' + (rest.hpPct == null ? '?' : Number(rest.hpPct).toFixed(0) + '%') + ' → ' + rest.untilPct + '%'
+            + (rest.remainingMs > 0 ? ' · เหลือสูงสุด ' + seconds(rest.remainingMs) : ''),
+          blocker: 'Combat รอให้พักเสร็จ', tone: 'waiting', progressKey: 'hp:' + Math.floor(Number(rest.hpPct) || 0),
+        };
+      } else if (context.utility?.state && context.utility.state !== 'IDLE') {
+        const utility = context.utility;
+        next = {
+          code: 'UTILITY', label: utility.label || 'งานเสริมกำลังทำงาน', detail: utility.state,
+          blocker: 'Combat และการเดินรอ ' + (utility.name || 'งานเสริม'),
+          tone: /^WAIT|PENDING/.test(utility.state) ? 'waiting' : 'active', progressKey: utility.name + ':' + utility.state + ':' + (utility.progressKey || ''),
+        };
+      } else if (context.healLockRemainingMs > 0) {
+        next = {
+          code: 'HEAL_WAIT', label: 'ใช้ยาแล้ว รอดีเลย์ Heal', detail: 'เหลือ ' + seconds(context.healLockRemainingMs),
+          blocker: 'Attack และ Skill รอ Heal', tone: 'waiting', progressKey: 'heal-lock',
+        };
+      } else if (context.support?.active) {
+        next = {
+          code: 'SUPPORT', label: context.support.label || 'กำลังใช้ Support Skill', detail: context.support.detail || '',
+          blocker: 'Combat รอคิว Skill', tone: context.support.waiting ? 'waiting' : 'active',
+          progressKey: context.support.progressKey || context.support.label,
+        };
+      } else if (context.loot?.warpQueueSize > 0) {
+        const loot = context.loot;
+        next = {
+          code: 'LOOT_WARP', label: 'กำลังวาร์ปไปเก็บของ',
+          detail: [loot.itemName || 'ของตก', loot.warpStage || '', 'คิววาร์ป ' + loot.warpQueueSize].filter(Boolean).join(' · '),
+          blocker: 'Combat รอให้เก็บของเสร็จ', tone: 'active',
+          progressKey: loot.progressKey || [loot.warpQueueSize, loot.warpStage].join(':'),
+        };
+      } else if (context.loot && (context.loot.queueSize > 0 || context.loot.settleRemainingMs > 0)) {
+        const loot = context.loot;
+        const parts = [];
+        if (loot.itemName) parts.push(loot.itemName);
+        if (loot.settleRemainingMs > 0) parts.push('รอ Drop packet ' + seconds(loot.settleRemainingMs));
+        else parts.push(loot.waitingResult ? 'รอผลเก็บของ' : 'เตรียมส่งคำสั่งเก็บ');
+        if (loot.attempts && loot.limit) parts.push('ครั้งที่ ' + loot.attempts + '/' + loot.limit);
+        if (loot.queueSize > 0) parts.push('คิวเหลือ ' + loot.queueSize);
+        next = {
+          code: 'LOOT', label: loot.settleRemainingMs > 0 ? 'กำลังรอของตก' : 'กำลังเก็บของ', detail: parts.join(' · '),
+          blocker: 'Combat รอให้เก็บของเสร็จ', tone: 'waiting',
+          progressKey: loot.progressKey || [loot.queueSize, loot.attempts, Math.ceil((loot.settleRemainingMs || 0) / 1000)].join(':'),
+        };
+      } else if (context.cooldownRemainingMs > 0) {
+        next = {
+          code: 'COMBAT_COOLDOWN', label: 'รอดีเลย์หลังจบงาน', detail: 'เหลือ ' + seconds(context.cooldownRemainingMs),
+          blocker: 'รอก่อนค้นหามอนตัวถัดไป', tone: 'waiting', progressKey: 'combat-cooldown',
+        };
+      } else if (context.warpGuardRemainingMs > 0) {
+        next = {
+          code: 'WARP_GUARD', label: 'รอพิกัดใหม่หลังวาร์ป', detail: 'timeout ใน ' + seconds(context.warpGuardRemainingMs),
+          blocker: 'Attack รอ Game Packet ตำแหน่ง', tone: 'waiting', progressKey: 'warp-guard',
+        };
+      } else if (context.target) {
+        const target = context.target;
+        const phases = {
+          walking: ['COMBAT_WALK', 'กำลังเดินไปหามอน', 'active'],
+          weapon: ['WEAPON_SWAP', 'กำลังเปลี่ยน Weapon Set', 'waiting'],
+          hidden: ['HIDDEN_WAIT', 'รอมอนออกจากสถานะซ่อนตัว', 'waiting'],
+          despawn: ['DESPAWN_WAIT', 'รอยืนยันว่ามอนหาย', 'waiting'],
+          steal: ['STEAL_WAIT', 'รอผล Steal', 'waiting'],
+          follow: ['ATTACK_FOLLOW', 'กำลังเดินตามมอนหลังสั่ง Attack', 'active'],
+          attack_wait: ['ATTACK_WAIT', 'รอผล Attack จาก server', 'waiting'],
+          attacking: ['ATTACKING', 'กำลังตีมอน', 'active'],
+          acquired: ['TARGET_ACQUIRED', 'พบมอนเป้าหมาย', 'active'],
+        };
+        const phase = phases[target.phase] || phases.acquired;
+        next = {
+          code: phase[0], label: phase[1],
+          detail: (target.name || 'มอนเป้าหมาย') + (Number.isFinite(Number(target.distance)) ? ' · ระยะ ' + Number(target.distance).toFixed(1) + ' ช่อง' : ''),
+          blocker: target.waitReason || '', tone: phase[2], progressKey: target.progressKey || target.phase + ':' + String(target.distance),
+        };
+      } else if (context.combatEnabled && context.search) {
+        const search = context.search;
+        const modes = { gat: 'เดินด้วย GAT', nav: 'เดินตาม Nav', random: 'สุ่มเดิน', waiting: 'รอรอบค้นหาถัดไป' };
+        const parts = [modes[search.mode] || 'ตรวจหามอนรอบตัว'];
+        if (search.elapsedMs >= 0) parts.push('ไม่เจอมอน ' + seconds(search.elapsedMs));
+        if (search.nextWarpMs > 0) parts.push('วาร์ปค้นหาใน ' + seconds(search.nextWarpMs));
+        next = {
+          code: 'SEARCH_MONSTER', label: 'กำลังค้นหามอน', detail: parts.join(' · '),
+          blocker: '', tone: search.mode === 'waiting' ? 'waiting' : 'active',
+          progressKey: search.progressKey || search.mode + ':' + Math.ceil((Number(search.elapsedMs) || 0) / 1000),
+        };
+      } else {
+        next = { code: 'IDLE', label: 'พร้อมทำงาน', detail: '', blocker: '', tone: 'active', progressKey: 'idle' };
+      }
+      const activityChanged = !current || current.code !== next.code || current.label !== next.label;
+      if (activityChanged) activitySince = now;
+      if (activityChanged || progressKey !== next.progressKey) progressAt = now;
+      progressKey = next.progressKey;
+      current = next;
+      return status(now);
+    }
+
+    function status(now = Date.now()) {
+      if (!current) return update({ now, masterEnabled: false });
+      return {
+        code: current.code,
+        label: current.label,
+        detail: current.detail,
+        blocker: current.blocker,
+        tone: current.tone,
+        sinceMs: Math.max(0, now - activitySince),
+        progressAgoMs: Math.max(0, now - progressAt),
+      };
+    }
+
+    return { update, status };
+  }
+
+  function createPlayerEncounterTracker() {
+    const nearbyEntityIds = new Map(); // entityId -> normalized name (อาจว่างจน SPAWN ส่งชื่อมา)
+    const arrivalsByPlayer = new Map();
+
+    function observe(event = {}) {
+      const id = event.id;
+      const distance = Number(event.distance);
+      if (id == null || !Number.isFinite(distance)) return { action: 'none' };
+      if (distance > 5) {
+        nearbyEntityIds.delete(id);
+        return { action: 'none' };
+      }
+      const displayName = String(event.name || '').split('\0')[0].trim();
+      const key = normalizePlayerName(displayName);
+      const alreadyNearby = nearbyEntityIds.has(id);
+      const recordedKey = nearbyEntityIds.get(id) || '';
+      if (alreadyNearby && (!key || recordedKey === key)) return { action: 'none' };
+      nearbyEntityIds.set(id, key);
+
+      const now = Number.isFinite(Number(event.now)) ? Number(event.now) : Date.now();
+      const windowMs = Math.max(0, Number(event.windowMs) || 0);
+      if (event.whitelisted) return { action: 'whitelist', name: displayName };
+      if (!key) return { action: 'flee', name: '', count: null };
+      const previous = arrivalsByPlayer.get(key) || [];
+      const arrivals = previous.filter(at => now - at <= windowMs);
+      arrivals.push(now);
+      arrivalsByPlayer.set(key, arrivals);
+      // Radar อาจยืนยันว่าเป็นผู้เล่นก่อน SPAWN ส่งชื่อมา: เก็บ episode นี้เข้าประวัติ
+      // เมื่อรู้ชื่อ แต่ห้ามสั่ง flee ซ้ำจากการโผล่ครั้งเดียวกัน.
+      if (alreadyNearby) return arrivals.length >= 3
+        ? { action: 'retreat', name: displayName, count: arrivals.length }
+        : { action: 'none', name: displayName, count: arrivals.length };
+      return arrivals.length >= 3
+        ? { action: 'retreat', name: displayName, count: arrivals.length }
+        : { action: 'flee', name: displayName, count: arrivals.length };
+    }
+
+    return {
+      observe,
+      forgetEntity(id) { nearbyEntityIds.delete(id); },
+      clearPresence() { nearbyEntityIds.clear(); },
+      reset() { nearbyEntityIds.clear(); arrivalsByPlayer.clear(); },
+    };
+  }
+
+  function createPlayerEncounterController(options = {}) {
+    const tracker = createPlayerEncounterTracker();
+    const getConfig = typeof options.getConfig === 'function' ? options.getConfig : (() => ({}));
+    const actions = options.actions || {};
+    let state = 'IDLE';
+    let mode = null;
+    let playerName = '';
+    let count = 0;
+    let deadlineAt = 0;
+
+    const command = (name, value) => {
+      const fn = actions[name];
+      return typeof fn === 'function' ? fn(value) : false;
+    };
+    const config = () => getConfig() || {};
+    const repeatWindowMs = () => Math.max(0, Number(config().repeatWindowSec) || 0) * 1000;
+    const whitelistDelayMs = () => Math.max(0, Number(config().whitelistDelaySec) || 0) * 1000;
+    const townRestMs = () => {
+      const cfg = config();
+      const rawWhitelistSeconds = cfg.whitelistTownRestSec;
+      const whitelistSeconds = Number(rawWhitelistSeconds);
+      const hasWhitelistSeconds = rawWhitelistSeconds !== null && rawWhitelistSeconds !== ''
+        && Number.isFinite(whitelistSeconds) && whitelistSeconds >= 0;
+      const seconds = mode === 'whitelist' && hasWhitelistSeconds
+        ? whitelistSeconds
+        : Math.max(0, Number(cfg.repeatTownRestSec) || 0);
+      return seconds * 1000;
+    };
+    const resetRuntime = () => {
+      state = 'IDLE';
+      mode = null;
+      playerName = '';
+      count = 0;
+      deadlineAt = 0;
+    };
+
+    function observePlayer(event = {}) {
+      if (state !== 'IDLE' && state !== 'WHITELIST_WORK' && state !== 'WHITELIST_DELAY') return { action: 'none' };
+      const result = tracker.observe({ ...event, windowMs: repeatWindowMs() });
+      if (result.action === 'none') return result;
+      if (result.action === 'whitelist') {
+        if (state === 'IDLE') {
+          state = 'WHITELIST_WORK';
+          mode = 'whitelist';
+          playerName = result.name;
+          deadlineAt = 0;
+        }
+        return result;
+      }
+      // ผู้เล่นนอก whitelist มี priority เหนือบทสนทนาที่กำลังรออยู่.
+      if (mode === 'whitelist') resetRuntime();
+      playerName = result.name;
+      count = result.count || 0;
+      if (result.action === 'retreat') {
+        mode = 'repeat';
+        state = 'WARP_TOWN';
+        command('warpTown', result);
+      } else {
+        command('flee', result);
+      }
+      return result;
+    }
+
+    function tick(context = {}) {
+      const now = Number.isFinite(Number(context.now)) ? Number(context.now) : Date.now();
+      const cfg = config();
+      if (state === 'IDLE') return { owned: false, state };
+      if (state === 'WHITELIST_WORK') {
+        if (context.workPending || context.conversationActive) return { owned: false, state };
+        command('sit');
+        deadlineAt = now + whitelistDelayMs();
+        state = 'WHITELIST_DELAY';
+        return { owned: true, state };
+      }
+      if (state === 'WHITELIST_DELAY') {
+        if (context.workPending || context.conversationActive) {
+          deadlineAt = 0;
+          state = 'WHITELIST_WORK';
+          return { owned: false, state };
+        }
+        if (now < deadlineAt) return { owned: true, state };
+        command('stand');
+        state = 'WARP_TOWN';
+        command('warpTown');
+        return { owned: true, state };
+      }
+      if (state === 'WARP_TOWN') {
+        // Same-map exact warps are confirmed by a fresh position packet.  Do not
+        // begin resting merely because town and farm happen to share a map name.
+        if (cfg.townMap && context.currentMap === cfg.townMap && !context.teleportActive) {
+          command('sit');
+          deadlineAt = now + townRestMs();
+          state = 'TOWN_REST';
+        } else if (!context.teleportActive) {
+          command('warpTown');
+        }
+        return { owned: true, state };
+      }
+      if (state === 'TOWN_REST') {
+        if (now < deadlineAt) return { owned: true, state };
+        command('stand');
+        deadlineAt = 0;
+        state = 'RETURN_FARM';
+        command('warpFarm');
+        return { owned: true, state };
+      }
+      if (state === 'RETURN_FARM') {
+        if (cfg.farmMap && context.currentMap === cfg.farmMap && !context.teleportActive) {
+          resetRuntime();
+          return { owned: false, state };
+        }
+        if (!context.teleportActive) command('warpFarm');
+        return { owned: true, state };
+      }
+      resetRuntime();
+      return { owned: false, state };
+    }
+
+    function skipRest() {
+      if (state !== 'TOWN_REST') return false;
+      command('stand');
+      deadlineAt = 0;
+      state = 'RETURN_FARM';
+      command('warpFarm');
+      return true;
+    }
+
+    function status(now = Date.now()) {
+      return {
+        state,
+        mode,
+        playerName,
+        count,
+        remainingMs: deadlineAt ? Math.max(0, deadlineAt - now) : 0,
+      };
+    }
+
+    return {
+      observePlayer,
+      tick,
+      skipRest,
+      status,
+      forgetEntity(id) { tracker.forgetEntity(id); },
+      clearPresence() { tracker.clearPresence(); },
+      reset() { tracker.reset(); resetRuntime(); },
+    };
+  }
+
+  return {
+    matchesPlayerWhitelist,
+    shouldHoldPlayerFleeForEncounter,
+    createBotActivityReporter,
+    createPlayerEncounterTracker,
+    createPlayerEncounterController,
+  };
+})();
+
+if (typeof module === 'object' && module.exports && typeof window === 'undefined') module.exports = RO_PURE_CORE;
+
+if (typeof window !== 'undefined') {
 (function () {
   if (window.__ASSIST) { console.warn('[ASSIST] รันอยู่แล้ว'); return; }
   window.__ASSIST = true;
@@ -124,7 +545,7 @@
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.1.10';
+  const VERSION = '1.2.2';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -140,7 +561,7 @@
     'combatEnabled', 'targetWhitelist', 'targetBlacklist', 'attackRange', 'rangedAttackRange', 'attackProbeMs', 'hiddenWaitMonsters', 'hiddenWaitSec', 'hiddenSightEnabled',
     'maxAcquireDistance', 'searchRadii', 'maxChaseDistance', 'antiKS', 'antiKSCooldownMs', 'avoidOtherPlayers', 'playerProximityRadius', 'postWarpTargetSettleMs', 'combatGatProgressTimeoutMs', 'targetLowestHpFirst',
     'weaponSetEnabled', 'weaponSets', 'weaponDefaultSetId', 'weaponMonsterRules',
-    'fleeOnMobCount', 'fleeOnAggroCount', 'fleeOnProximityCount', 'fleeOnProximityRadius', 'fleeMonsters', 'fleeMonsterRadius', 'fleeOnPlayerCount', 'fleeOnPlayerRadius', 'fleeOnPlayerDelaySec', 'fleePlayerExceptions', 'fleeOnMvp', 'fleeOnMvpRadius', 'maxEngageSecSlow', 'slowMonsterSubIds',
+    'fleeOnMobCount', 'fleeOnAggroCount', 'fleeOnProximityCount', 'fleeOnProximityRadius', 'fleeMonsters', 'fleeMonsterRadius', 'fleeOnPlayerCount', 'fleeOnPlayerRadius', 'fleeOnPlayerDelaySec', 'fleePlayerExceptions', 'fleePlayerRepeatWindowSec', 'fleePlayerRepeatTownRestSec', 'fleePlayerWhitelistTownRestSec', 'fleeOnMvp', 'fleeOnMvpRadius', 'maxEngageSecSlow', 'slowMonsterSubIds',
     'wanderEnabled', 'warpFindEnabled', 'noMonsterWarpSec', 'warpToMonster', 'warpToMonsterMaxPerEntity', 'stuckWarpOnAbandon', 'warpToBoss',
     'restEnabled', 'restHpPercent', 'restUntilPercent', 'restMaxSec', 'postCombatDelayMs', 'autoRespawnEnabled', 'autoRespawnDelayMs', 'telegramAlertCard', 'telegramAlertFlee', 'telegramAlertBotMention', 'telegramAlertNearby', 'telegramAlertWhisper', 'telegramBotToken', 'telegramChatId',
     'sellEnabled', 'sellNpcName', 'sellNpcMap', 'sellNpcX', 'sellNpcY', 'sellIntervalMin', 'sellOnFull', 'sellItemIds',
@@ -570,7 +991,10 @@
     fleeOnPlayerCount: 1,         // พบผู้เล่นอื่น N คนในระยะ → วาร์ปหนี (0=off)
     fleeOnPlayerRadius: 30,       // รัศมีตรวจผู้เล่นอื่น (ช่อง)
     fleeOnPlayerDelaySec: 4,      // พบผู้เล่นแล้วรอก่อนวาร์ป (0=ทันที)
-    fleePlayerExceptions: [],     // ชื่อผู้เล่นที่ไม่นับใน Flee Player (ไม่สนตัวพิมพ์เล็ก-ใหญ่)
+    fleePlayerExceptions: [],     // whitelist: ไม่หนี และใช้ flow สนทนา/จบงานก่อนกลับเมือง
+    fleePlayerRepeatWindowSec: 10, // ผู้เล่นคนเดิมโผล่ใกล้ 3 ครั้งภายในช่วงนี้ → กลับเมือง
+    fleePlayerRepeatTownRestSec: 300, // เวลาพักเมืองเมื่อถูกผู้เล่นคนเดิมตามซ้ำ
+    fleePlayerWhitelistTownRestSec: null, // เวลาพักเมืองของ whitelist; ว่าง = ใช้ค่าพักตามซ้ำ
     fleeOnMvp: false,             // ตรวจพบ MVP/Boss บน minimap ในระยะ → วาร์ปหนี
     fleeOnMvpRadius: 20,          // รัศมีตรวจ MVP/Boss (ช่อง)
     // KS avoidance + ป้องกันแย่ง
@@ -847,6 +1271,7 @@
   let lastPlayerPositionChangedAt = 0; // เวลา player ขยับจริงล่าสุด (สำหรับ lock สกิลระหว่างเดิน)
   let lastPlayerPositionPacketAt = 0;  // packet ตำแหน่งล่าสุด (ใช้จับ action ของ Loot Queue)
   let teleportCoordinator = null;      // สร้างหลัง state วาร์ปพร้อม; setPlayerPosition แจ้งการยืนยันพิกัดสดได้
+  let playerEncounter = null;          // สร้างหลัง combat/flow state พร้อม; clearWarpState ใช้ re-arm การตรวจผู้เล่น
   function setPlayerPosition(x, y) {
     lastPlayerPositionPacketAt = nowMs();
     if (player.x !== x || player.y !== y) lastPlayerPositionChangedAt = nowMs();
@@ -1185,7 +1610,9 @@
     if (dist(player, other) > radius) return null;
     const allowedNames = aiReplyAllowedNameSet();
     const verifiedName = String(other.name || name || '').trim();
-    if (allowedNames.size && !allowedNames.has(verifiedName.toLowerCase())) return null;
+    // Player Whitelist เป็น source of truth ของ encounter flow: ผู้เล่นที่ไว้ใจต้องคุยได้
+    // โดยไม่ต้องกรอกชื่อซ้ำใน AI Reply allowed names.
+    if (allowedNames.size && !allowedNames.has(verifiedName.toLowerCase()) && !isFleePlayerException(other)) return null;
     if (CFG.aiReplyRequireNameMention) {
       if (!playerName || !String(message || '').toLowerCase().includes(playerName.toLowerCase())) return null;
     }
@@ -1607,6 +2034,7 @@
   // ============================================================
   const buffLoop = setInterval(() => {
     if (!masterBot.enabled()) return;
+    if (isPlayerEncounterActive()) return;
     if (!CFG.buffEnabled) return;
     if (isAbBuffActive()) return;
     if (!CFG.buffItems || !CFG.buffItems.length) return;
@@ -1765,6 +2193,7 @@
 
     // 3. รีเซ็ตระบบเดิน/สำรวจ
     movementPlanner.reset();
+    playerEncounter?.clearPresence();
   }
 
   // ★ ส่ง packet วาร์ปจริงเท่านั้น — caller ทุกจุดต้องผ่าน Teleport coordinator ด้านล่าง
@@ -2368,6 +2797,7 @@
       resume() { connect(); },
       tick() {
         if (!masterBot.enabled()) return;
+        if (isPlayerEncounterActive()) return;
         connect(); offerPending();
         if (role() !== 'collector') return;
         // hard-full = เก็บต่อไม่ได้แล้ว จึงคืนงานให้ queue ก่อนให้ Storage เป็นเจ้าของการวาร์ป
@@ -2590,7 +3020,9 @@
           transportReconnectCount: transport.reconnectCount, transportLastCloseReason: transport.lastCloseReason,
           lastClaimRttMs, claimPendingId, claimPendingRemainingMs: claimPendingId ? Math.max(0, claimResponseTimeoutMs() - (nowMs() - claimPendingAt)) : 0,
           pendingOffers: pendingOffers.size,
-          activeJob: activeJob && activeJob.job, activeStage: activeJob?.stage || (homeReturn ? 'return-home ' + homeReturn.attempts + '/' + MAX_WARP_ATTEMPTS : ''),
+          activeJob: activeJob && activeJob.job, activeStage: activeJob?.stage || (homeReturn ? 'return-home' : ''),
+          activePickupAttempts: activeJob?.pickupAttempts || 0, pickupAttemptLimit: pickupAttemptLimit(),
+          activeProgressAt: activeJob?.lastActionAt || activeJob?.claimedAt || 0, homeReturnAttempts: homeReturn?.attempts || 0,
           claimDelayRemainingMs: activeJob ? Math.max(0, (activeJob.claimDelayUntil || 0) - nowMs()) : 0,
           nearbySettleRemainingMs: activeJob ? Math.max(0, (activeJob.settleUntil || 0) - nowMs()) : 0,
           canSkip, availableJobs: availableJobs.size, returningHome: !!homeReturn };
@@ -3288,6 +3720,7 @@
           log('🗺️ แมป:', name);
           // ★★★ clear entities ของแมปเก่า — กัน monster ค้างติดมาแมปใหม่ (mirror world.js:293-306)
           //   ปัญหา: ไม่ clear → Merman/Strouf จากแมปเก่ายังค้าง → บอทพยายามตีมอนที่ไม่มีจริง
+          playerEncounter?.clearPresence();
           entities.clear();
           radarPlayerIds.clear();
           // self entity ของแมปเก่าก็ห้ามค้างข้ามมา: playerId ยังอยู่ และ packet สดจะสร้างใหม่.
@@ -3301,7 +3734,7 @@
           //   เงื่อนไข: warpBackToFarm=on AND farmMap ไม่ว่าง AND ตอนนี้ไม่ใช่ farmMap
           //   ★★ ไม่จำกัดแค่ "มาจาก farmMap" — ถ้าอยู่แมปผิดก็วาร์ปกลับเสมอ (กันติดแมปอื่น)
           //   ยกเว้น: อยู่ใน sell/storage/ore-refine routine — ไม่วาร์ปกลับ
-          if (masterBot.enabled() && CFG.warpBackToFarm && CFG.farmMap && name !== CFG.farmMap && !lootQueue.isCollectorActive() && !isAbBuffActive()
+          if (masterBot.enabled() && CFG.warpBackToFarm && CFG.farmMap && name !== CFG.farmMap && !lootQueue.isCollectorActive() && !isAbBuffActive() && !isPlayerEncounterActive()
               && name !== CFG.sellNpcMap && name !== CFG.kafraMap
               && !(isOreRefineActive() && name === CFG.oreRefineMap)) {
             log('🌀 อยู่แมปผิด (' + name + '≠' + CFG.farmMap + ') → วาร์ปกลับ');
@@ -3324,7 +3757,7 @@
       if (u.length >= 7 + mapLen && mapLen > 0) {
         let name = new TextDecoder().decode(u.slice(7, 7 + mapLen));
         name = name.split('\0')[0];   // ตัดที่ null terminator
-        if (name && name !== currentMap) { currentMap = name; confirmTeleportMapChange(name); lootQueue.onMapChanged(name); movementPlanner.reset(); log('🗺️ แมป:', name, '(จาก SELECT_CHAR)'); }
+        if (name && name !== currentMap) { currentMap = name; confirmTeleportMapChange(name); lootQueue.onMapChanged(name); playerEncounter?.clearPresence(); movementPlanner.reset(); log('🗺️ แมป:', name, '(จาก SELECT_CHAR)'); }
       }
     }
     // 0x2a WARP_FAIL: server บอกว่าพิกัดวาร์ป invalid (กำแพง/น้ำ) → warpLoop จะลอง offset ถัดไป
@@ -4000,6 +4433,7 @@
         // ★ ถ้าเป็น boss/mini boss ที่ตาย → ล้าง bossAlertedIds เพื่อ alert ใหม่ตอนเกิดใหม่
         if (e._isMiniBoss || e._isBoss) { bossAlertedIds.delete(id); log((e._isBoss ? '👑 Boss' : '👹 Mini Boss') + ' ตาย — จะ alert ใหม่เมื่อเกิดใหม่'); }
       }
+      playerEncounter?.forgetEntity(id);
       entities.delete(id);
       radarPlayerIds.delete(id);
       warpToMonsterCount.delete(id); // มอนตายแล้ว ID นี้อาจถูกนำไป spawn ตัวใหม่ได้
@@ -4046,6 +4480,7 @@
             current._despawnToken = 0;
             return;
           }
+          playerEncounter?.forgetEntity(id);
           entities.delete(id);
           radarPlayerIds.delete(id);
           warpToMonsterCount.delete(id);
@@ -4618,6 +5053,7 @@
   // ---------- loop เก็บของ ----------
   const lootLoop = setInterval(() => {
     if (!masterBot.enabled()) return;
+    if (isPlayerEncounterBlockingAutomation()) return;
     if (!CFG.lootEnabled) return;
     if (lootQueue.isCollectorBusy()) return;
     if (isAbBuffActive()) return;
@@ -4684,6 +5120,7 @@
   const WARP_OFFSETS = [[0,0,'กลาง'], [0,-3,'เหนือ3'], [3,0,'ตอ3'], [0,3,'ใต้3'], [-3,0,'ตต3']];
   const warpLoop = setInterval(() => {
     if (!masterBot.enabled()) return;
+    if (isPlayerEncounterActive()) return;
     if (!CFG.warpLootEnabled) return;
     if (isAbBuffActive()) return;
     if (isAiReplyInteractionActive()) return;
@@ -4755,6 +5192,7 @@
   // สร้าง trigger check + state machine ใน loop เดียว
   const sellLoop = setInterval(() => {
     if (!masterBot.enabled()) return;
+    if (isPlayerEncounterActive()) return;
     if (!CFG.sellEnabled) return;
     if (isAbBuffActive()) return;
     if (isOreRefineActive()) return;
@@ -5025,6 +5463,7 @@
   }
   function storageLoopTick() {
     if (!masterBot.enabled()) return;
+    if (isPlayerEncounterActive()) return;
     if (!CFG.storageEnabled) return;
     if (isAbBuffActive()) return;
     if (isOreRefineActive()) return;
@@ -5662,6 +6101,87 @@
   // ---------- combat target state ----------
   let target = null;             // {id, x, y, acquiredAt, engageAt, attackProbeAt, lastAttackSignalAt, ...}
 
+  // ============================================================
+  //  PLAYER ENCOUNTER — ผู้เล่นทั่วไปหนีตามเดิม; คนเดิมรอบ 3 กลับเมืองพัก
+  //  interface เดียวรับ packet event, tick flow, ข้ามพัก และอ่านสถานะ.
+  // ============================================================
+  function playerEncounterConfig() {
+    return {
+      repeatWindowSec: CFG.fleePlayerRepeatWindowSec,
+      repeatTownRestSec: CFG.fleePlayerRepeatTownRestSec,
+      whitelistDelaySec: CFG.fleeOnPlayerDelaySec,
+      whitelistTownRestSec: CFG.fleePlayerWhitelistTownRestSec,
+      townMap: CFG.kafraMap,
+      farmMap: CFG.farmMap,
+    };
+  }
+  function playerEncounterWarpTown(result) {
+    resetFleePlayerDelay();
+    clearAiInteraction(result ? 'ผู้เล่นคนเดิมตามซ้ำ' : 'จบ whitelist flow');
+    const point = storageKafraPoint();
+    if (!CFG.kafraMap || !Number.isFinite(point.warpX) || !Number.isFinite(point.warpY)) {
+      log('⚠️ Player Encounter: ยังไม่ได้ตั้งแมป/พิกัด Kafra สำหรับกลับเมือง');
+      return false;
+    }
+    if (result) {
+      log('🚨 ผู้เล่นคนเดิม ' + (result.name || '?') + ' โผล่ใกล้ครั้งที่ ' + result.count + ' → กลับเมืองพัก');
+      logImportant('flee', '🚨 ' + (result.name || 'ผู้เล่นไม่ทราบชื่อ') + ' ตามใกล้ครบ ' + result.count + ' ครั้ง → กลับเมืองพัก');
+    }
+    return sendTeleport(CFG.kafraMap, point.warpX, point.warpY, result ? 'player-repeat-town-rest' : 'player-whitelist-town-rest');
+  }
+  function playerEncounterWarpFarm() {
+    if (!CFG.farmMap) { log('⚠️ Player Encounter: ยังไม่ได้ตั้ง farmMap สำหรับกลับไปฟาร์ม'); return false; }
+    return sendTeleport(CFG.farmMap, CFG.farmMapX, CFG.farmMapY, 'player-encounter-return-farm');
+  }
+  playerEncounter = RO_PURE_CORE.createPlayerEncounterController({
+    getConfig: playerEncounterConfig,
+    actions: {
+      flee(result) {
+        if (result && result.count) log('👤 ' + result.name + ' โผล่ใกล้รอบ ' + result.count + '/3 ในช่วงนับ');
+        clearAiInteraction('พบผู้เล่นนอก whitelist');
+        return fleePlayersIfNeeded(result && result.name ? ' (' + result.name + ' รอบ ' + result.count + '/3)' : '');
+      },
+      warpTown: playerEncounterWarpTown,
+      warpFarm: playerEncounterWarpFarm,
+      sit() {
+        if (isResting) return true;
+        if (!sendSit()) return false;
+        isResting = true;
+        return true;
+      },
+      stand() {
+        if (!isResting) return true;
+        if (!sendStand()) return false;
+        isResting = false;
+        return true;
+      },
+    },
+  });
+  function isPlayerEncounterActive() {
+    return playerEncounter && playerEncounter.status().state !== 'IDLE';
+  }
+  function isPlayerEncounterBlockingAutomation() {
+    return isPlayerEncounterActive() && RO_PURE_CORE.shouldHoldPlayerFleeForEncounter(playerEncounter.status().state);
+  }
+  function tickPlayerEncounter(now = nowMs()) {
+    const before = playerEncounter.status(now);
+    const result = playerEncounter.tick({
+      now,
+      currentMap,
+      workPending: !!target || shouldDeferRestForNormalLoot(now),
+      conversationActive: isAiReplyInteractionActive(),
+      teleportActive: !!teleportCoordinator?.status().active,
+    });
+    const after = playerEncounter.status(now);
+    if (before.state !== after.state) {
+      log('👤 Player Encounter:', before.state, '→', after.state,
+        after.playerName ? '(' + after.playerName + ')' : '');
+      if (after.state === 'TOWN_REST') log('💤 พักในเมือง', Math.ceil(after.remainingMs / 1000) + 's');
+      else if (after.state === 'IDLE' && before.state === 'RETURN_FARM') log('🌾 Player Encounter: กลับฟาร์มแล้ว');
+    }
+    return result;
+  }
+
   // ---------- WEAPON SET CONTROLLER ----------
   // Interface: ensureWeaponSetForTarget(monster, now) returns true only when combat
   // may proceed. Its implementation owns packet order, acknowledgement and timeout.
@@ -6043,9 +6563,7 @@
   }
   const normalizedPlayerName = (name) => String(name || '').split('\0')[0].trim().toLocaleLowerCase();
   function isFleePlayerException(entity) {
-    const name = normalizedPlayerName(entity?.name);
-    if (!name || !Array.isArray(CFG.fleePlayerExceptions)) return false;
-    return CFG.fleePlayerExceptions.some(exception => normalizedPlayerName(exception) === name);
+    return RO_PURE_CORE.matchesPlayerWhitelist(entity?.name, CFG.fleePlayerExceptions);
   }
   // ผู้เล่นจาก minimap marker อาจไม่มีชื่อ จึงห้ามใช้ชื่อเป็นเงื่อนไข
   function countOtherPlayers(radius) {
@@ -6900,6 +7418,7 @@ function abBuffTimeoutMs() {
   }
   const abBuffLoop = setInterval(() => {
     if (!masterBot.enabled()) return;
+    if (isPlayerEncounterActive()) return;
     const timerNow = abBuffTimerNow();      // timer ภายใน AB ต้องเป็น clock เดียวกันทั้งหมด
     for (const [statusId, effect] of abBuffEffects) {
       if (effect.expiresAt <= timerNow) abBuffEffects.delete(statusId);
@@ -7206,6 +7725,10 @@ function abBuffTimeoutMs() {
   // คืน true ระหว่างนับ delay/เก็บของ/cooldown เพื่อห้าม flow อื่น (พัก/เดิน/ตี) แทรก
   function fleePlayersIfNeeded(reasonSuffix = '') {
     if (!masterBot.enabled()) return false;
+    if (RO_PURE_CORE.shouldHoldPlayerFleeForEncounter(playerEncounter.status().state)) {
+      resetFleePlayerDelay();
+      return false;
+    }
     // AI Reply ต้อง hold การวาร์ปจนสนทนาจบ แต่ห้ามล้างเวลาที่เริ่มพบผู้เล่นแล้ว
     // เมื่อผู้พูดออกจากระยะตอบ หากยังมีคนอยู่ใน Flee radius จะวาร์ปได้ทันที
     // หาก delay ครบไปก่อนแล้ว แทนที่จะเริ่มนับ delay ใหม่อีกรอบ
@@ -7225,7 +7748,7 @@ function abBuffTimeoutMs() {
       return false;
     }
     const now = nowMs();
-    const delaySec = Math.max(0, Math.min(10, Number(CFG.fleeOnPlayerDelaySec) || 0));
+    const delaySec = Math.max(0, Math.min(300, Number(CFG.fleeOnPlayerDelaySec) || 0));
     const delayMs = Math.round(delaySec * 1000);
     if (!fleePlayerDetectedAt) {
       fleePlayerDetectedAt = now;
@@ -7253,9 +7776,25 @@ function abBuffTimeoutMs() {
   // ดักทันทีเมื่อ packet ยืนยันผู้เล่นเข้ามา โดยไม่รอ combat tick
   function instantFleeCheck(e) {
     if (!masterBot.enabled()) return;
+    if (!CFG.fleeOnPlayerCount || CFG.fleeOnPlayerCount <= 0) return;
     if (!e || e.kind !== 0 || !e.alive || e.id === playerId || e.x == null || e.y == null) return;
+    if (shouldHoldFleePlayerForAbBuff() || shouldHoldFleePlayerForStorage() || isOreRefineActive()) return;
+    if (player.x == null || player.y == null) return;
+    const distance = Math.hypot(e.x - player.x, e.y - player.y);
+    const encounter = playerEncounter.observePlayer({
+      id: e.id,
+      name: e.name,
+      distance,
+      whitelisted: isFleePlayerException(e),
+      now: nowMs(),
+    });
+    if (encounter.action === 'whitelist') {
+      log('💬 Player Whitelist:', encounter.name || e.id.toString(16), 'โผล่ใกล้ ' + distance.toFixed(1) + ' ช่อง → จบงานและรอสนทนา');
+      return;
+    }
+    if (encounter.action === 'flee' || encounter.action === 'retreat') return;
     const radius = CFG.fleeOnPlayerRadius || 10;
-    if (player.x == null || Math.hypot(e.x - player.x, e.y - player.y) > radius) return;
+    if (distance > radius || isFleePlayerException(e)) return;
     fleePlayersIfNeeded(' (⚡ ทันที)');
   }
 
@@ -7492,6 +8031,9 @@ function abBuffTimeoutMs() {
       if (tryIdleSupportSkill(now)) return;
       return;
     }
+    // Player Encounter เป็นเจ้าของลำดับ จบงาน → นั่ง/คุย → เมือง → พัก → กลับฟาร์ม.
+    // WHITELIST_WORK คืน owned=false เฉพาะตอนต้องปล่อย combat/loot/AI เดิมให้จบ.
+    if (tickPlayerEncounter(now).owned) return;
     // Player Flee เป็น safety flow อิสระจาก Combat: OFF ก็ยังต้องหนีผู้เล่นที่ยืนนิ่งอยู่ได้
     // AB Buff / Storage hold อยู่ภายใน fleePlayersIfNeeded แล้ว
     if (!isDead && activeWS && activeWS.readyState === 1 && fleePlayersIfNeeded()) return;
@@ -7546,7 +8088,7 @@ function abBuffTimeoutMs() {
     const inSellRoutine = sellState !== 'IDLE';
     const inStorageRoutine = storageState !== 'IDLE';
     const inOreRefineRoutine = isOreRefineActive();
-    if (!isAbBuffActive() && CFG.farmMap && currentMap && currentMap !== CFG.farmMap
+    if (!isAbBuffActive() && !isPlayerEncounterActive() && CFG.farmMap && currentMap && currentMap !== CFG.farmMap
         && !(inSellRoutine && currentMap === CFG.sellNpcMap)
         && !(inStorageRoutine && currentMap === CFG.kafraMap)
         && !(inOreRefineRoutine && currentMap === CFG.oreRefineMap)) {
@@ -8759,8 +9301,134 @@ function abBuffTimeoutMs() {
         gatMapReset();
         lastNavLogTag = '';
       },
+      status() { return { mode: hasGat() ? 'gat' : (hasNav() ? 'nav' : 'random') }; },
     };
   })();
+
+  // ============================================================
+  //  BOT ACTIVITY — read-only projection ของ flow เดิมสำหรับ HUD/diagnostics
+  //  ไม่มี timer หรือคำสั่งควบคุม automation ของตัวเอง.
+  // ============================================================
+  const botActivityReporter = RO_PURE_CORE.createBotActivityReporter();
+  let lastBotActivityLogCode = '';
+  function botTargetActivity(now) {
+    if (!target) return null;
+    const entity = entities.get(target.id);
+    const distance = entity && player.x != null && entity.x != null
+      ? Math.hypot(entity.x - player.x, entity.y - player.y)
+      : target.lastDist;
+    let phase = 'acquired', waitReason = '';
+    if (weaponSwap) { phase = 'weapon'; waitReason = 'Combat รอ server ยืนยันอาวุธ'; }
+    else if (target.hiddenWaitAt || target.cloakingActiveAt) { phase = 'hidden'; waitReason = target.hiddenWaitReason || 'รอ Game Packet ยืนยันว่าเลิกซ่อนตัว'; }
+    else if (target.despawnCheckAt) { phase = 'despawn'; waitReason = 'รอ Game Packet ยืนยันสูงสุด 3s'; }
+    else if (target.stealPending) { phase = 'steal'; waitReason = 'Attack รอผล Steal'; }
+    else if (target.lastAttackAt) {
+      const hasSignal = target.lastAttackSignalAt >= target.attackProbeAt;
+      if (hasSignal) phase = 'attacking';
+      else if (target.followObservedAt) phase = 'follow';
+      else { phase = 'attack_wait'; waitReason = 'รอ hit/miss/movement จาก server'; }
+    } else if (Number.isFinite(Number(distance)) && distance > CFG.maxAcquireDistance) phase = 'walking';
+    return {
+      phase, name: target.name || entity?.name || ('#' + target.id.toString(16)), distance,
+      waitReason,
+      progressKey: [target.id, phase, player.x, player.y, entity?.x, entity?.y, target.lastAttackSignalAt || 0, target.stealAttempts || 0].join(':'),
+    };
+  }
+  function botUtilityActivity(now = nowMs()) {
+    if (isAbBuffActive()) return { name: 'AB Buff', label: 'กำลังทำ AB Buff', state: abBuffState };
+    if (abBuffState === 'PENDING_IDLE') {
+      if (target || isLootCommandLocked(now)) return null;
+      return { name: 'AB Buff', label: 'AB Buff รอเริ่มงาน', state: abBuffState };
+    }
+    if (storageState !== 'IDLE') return { name: 'Storage', label: 'กำลังฝาก/ถอนของกับ Kafra', state: storageState };
+    if (isOreRefineActive()) return { name: 'Ore Refine', label: 'กำลังย่อยแร่/ขายของ', state: oreRefineState, progressKey: oreRefineBatch };
+    if (sellState !== 'IDLE') return { name: 'Sell', label: 'กำลังขายของ', state: sellState };
+    return null;
+  }
+  function botActivityContext(now = nowMs()) {
+    const collectorStatus = lootQueue.status();
+    const collectorJob = collectorStatus.activeJob;
+    const warpLoot = warpQueue.values().next().value;
+    const normalLoot = pickupPending ? queue.get(pickupPending.dropId) : (queue.values().next().value || warpLoot);
+    const encounter = playerEncounter.status(now);
+    const teleport = teleportCoordinator.status().active;
+    const supportJob = autoSupportQueue[0] || manualSkillQueue[0];
+    const noMonsterElapsedMs = noMonsterSince ? Math.max(0, now - noMonsterSince) : 0;
+    const noMonsterWarpMs = Math.max(0, Number(CFG.noMonsterWarpSec) || 0) * 1000;
+    const respawnRemainingMs = Math.max(0, Number(CFG.autoRespawnDelayMs) - (now - lastRespawnAt));
+    const fleeDelayMs = Math.max(0, Math.min(300, Number(CFG.fleeOnPlayerDelaySec) || 0) * 1000);
+    const utility = botUtilityActivity(now);
+    const finishingAiTarget = !!(aiInteraction && aiInteraction.phase === 'FINISH_COMBAT' && target);
+    return {
+      now,
+      masterEnabled: masterBot.enabled(), socketConnected: !!activeWS && activeWS.readyState === 1,
+      dead: isDead, autoRespawnEnabled: CFG.autoRespawnEnabled, respawnRemainingMs,
+      collector: collectorStatus.activeJob || collectorStatus.returningHome ? {
+        busy: true, stage: collectorStatus.activeStage, itemName: collectorJob?.itemName || (collectorStatus.returningHome ? 'กลับจุดรอ' : ''),
+        attempts: collectorStatus.activePickupAttempts || collectorStatus.homeReturnAttempts,
+        limit: collectorStatus.returningHome ? 3 : collectorStatus.pickupAttemptLimit,
+        progressKey: [collectorJob?.id || 'home', collectorStatus.activeStage, collectorStatus.activePickupAttempts, collectorStatus.homeReturnAttempts, collectorStatus.activeProgressAt].join(':'),
+      } : null,
+      playerEncounter: {
+        ...encounter,
+        workLabel: encounter.state === 'WHITELIST_WORK'
+          ? (target ? 'กำลังตี ' + (target.name || ('#' + target.id.toString(16))) : (queue.size ? 'กำลังเก็บของในคิว ' + queue.size + ' ชิ้น' : ''))
+          : '',
+        progressKey: encounter.state,
+      },
+      flee: fleePlayerDetectedAt ? {
+        active: true, deferredForLoot: fleePlayerDeferredForLoot, queueSize: queue.size,
+        remainingMs: Math.max(0, fleeDelayMs - (now - fleePlayerDetectedAt)),
+      } : null,
+      ai: isAiReplyInteractionActive() ? {
+        active: true, phase: aiInteraction?.phase, speaker: aiInteraction?.name,
+        progressKey: [aiInteraction?.phase, aiInteraction?.startedAt, aiReplyPending].join(':'),
+      } : null,
+      teleport,
+      currentMap, farmMap: CFG.farmMap,
+      wrongFarmMap: !!CFG.farmMap && !!currentMap && currentMap !== CFG.farmMap && !utility && !isPlayerEncounterActive(),
+      rest: isResting ? {
+        active: true, postRespawn: postRespawnRest, hpPct: hpPct(), untilPct: CFG.restUntilPercent,
+        remainingMs: Math.max(0, restUntil - now),
+      } : null,
+      utility,
+      healLockRemainingMs: Math.max(0, heal.commandLockUntil - now),
+      support: supportJob ? {
+        active: true,
+        label: 'กำลังใช้ Skill: ' + (supportJob.skill?.name || ('#' + (supportJob.skill?.skillId || '?'))),
+        detail: supportJob.targetName ? 'เป้าหมาย ' + supportJob.targetName : '',
+        waiting: !!manualSkillQueueTimer || supportQueueCommandWaitMs(now) > 0,
+        progressKey: [supportJob.skill?.skillId, supportJob.targetId, supportJob.sentAt || 0, supportJob.confirmedAt || 0].join(':'),
+      } : null,
+      loot: !finishingAiTarget && (queue.size || warpQueue.size || lootSettleUntil > now) ? {
+        queueSize: queue.size, settleRemainingMs: Math.max(0, lootSettleUntil - now),
+        warpQueueSize: warpQueue.size,
+        warpStage: warpLoot ? 'ตำแหน่ง ' + ((warpLoot.offsetIdx || 0) + 1) + '/' + WARP_OFFSETS.length : '',
+        itemName: normalLoot ? nameOf(normalLoot.itemId) : '', attempts: normalLoot?.attempts || 0,
+        limit: CFG.maxAttempts, waitingResult: !!pickupPending,
+        progressKey: [pickupPending?.dropId || normalLoot?.dropId || '', queue.size, warpQueue.size, normalLoot?.attempts || 0, warpLoot?.offsetIdx || 0, stats.itemsLooted].join(':'),
+      } : null,
+      cooldownRemainingMs: Math.max(0, combatCooldownUntil - now),
+      warpGuardRemainingMs: lastWarpPlayerPos && warpGuardUntil > now ? Math.max(0, warpGuardUntil - now) : 0,
+      combatEnabled: CFG.combatEnabled,
+      target: botTargetActivity(now),
+      search: CFG.combatEnabled && !target ? {
+        elapsedMs: noMonsterElapsedMs,
+        mode: CFG.wanderEnabled ? movementPlanner.status().mode : 'waiting',
+        nextWarpMs: CFG.warpFindEnabled ? Math.max(0, noMonsterWarpMs - noMonsterElapsedMs) : 0,
+        progressKey: [currentMap, movementPlanner.status().mode, player.x, player.y, lastWanderAt, lastWarpFindAt].join(':'),
+      } : null,
+    };
+  }
+  function botActivityStatus(now = nowMs(), recordTransition = true) {
+    const status = botActivityReporter.update(botActivityContext(now));
+    const result = { ...status, lastGamePacketAgoMs: lastGamePacketAt ? Math.max(0, now - lastGamePacketAt) : null };
+    if (recordTransition && status.code !== lastBotActivityLogCode) {
+      lastBotActivityLogCode = status.code;
+      log('🤖 Bot Activity:', status.label + (status.detail ? ' — ' + status.detail : ''));
+    }
+    return result;
+  }
 
   // ---------- patch WebSocket ----------
   function attach(ws) {
@@ -8884,7 +9552,7 @@ function abBuffTimeoutMs() {
     const silentMs = now - lastGamePacketAt;
     if (playerId != null && silentMs > stallMs) {
       scheduleAutoRefresh('ไม่มี packet ' + Math.round(silentMs / 1000) + 's');
-    } else if (playerId != null && movementStallMs > 0 && lastPlayerPositionChangedAt > 0 && now - lastPlayerPositionChangedAt > movementStallMs) {
+    } else if (!isPlayerEncounterActive() && playerId != null && movementStallMs > 0 && lastPlayerPositionChangedAt > 0 && now - lastPlayerPositionChangedAt > movementStallMs) {
       scheduleAutoRefresh('ตัวละครไม่ขยับ ' + Math.round((now - lastPlayerPositionChangedAt) / 1000) + 's');
     } else if (wsOpen && playerId == null && CFG.autoLoginEnabled && wsOpenedAt && now - wsOpenedAt > stallMs) {
       scheduleAutoRefresh('ค้างหน้า login/เลือกตัวละครเกิน ' + Math.round(stallMs / 1000) + 's');
@@ -8910,6 +9578,7 @@ function abBuffTimeoutMs() {
       navPatrolReset(); navWanderReset(); gatWanderReset();
       resetAutoSupportQueue();
       clearAiInteraction('Master Bot paused');
+      playerEncounter.reset();
       stopAbBuff('Master Bot paused');
       sellState = 'IDLE'; sellReturnTo = null; sellNpcId = null;
       storageState = 'IDLE'; storageReturnTo = null; storageNpcId = null; storageMoveQueue = []; storageMoveIdx = 0;
@@ -8934,6 +9603,7 @@ function abBuffTimeoutMs() {
     if (storageState !== 'IDLE') blockers.push('กำลังฝาก Kafra');
     if (isOreRefineActive()) blockers.push('กำลังแปรรูปแร่');
     if (isAbBuffActive()) blockers.push('กำลังรับ AB Buff');
+    if (isPlayerEncounterActive()) blockers.push('Player Encounter กำลังทำงาน/พักเมือง');
     if (target || weaponSwap) blockers.push('กำลังสู้/สลับอาวุธ');
     return blockers;
   }
@@ -8948,6 +9618,7 @@ function abBuffTimeoutMs() {
     postWarpTargetSettlePending = false;
     postWarpTargetSettleUntil = 0;
     clearAiInteraction();
+    playerEncounter.reset();
     navPatrolReset();
     navWanderReset();
     gatWanderReset();
@@ -9038,6 +9709,7 @@ function abBuffTimeoutMs() {
     deleteProfile(name) { return deleteProfile(name); },
 
     // ---------- สถานะ ----------
+    botActivityStatus() { return botActivityStatus(); },
     status() {
       const pct = hpPct();
       console.table([{
@@ -9065,6 +9737,7 @@ function abBuffTimeoutMs() {
         hp: { ...hp }, hpPct: pct, isDead,
         heal: { enabled: CFG.healEnabled, mode: CFG.healMode, threshold: CFG.healAtPercent + '%', items: healStatus },
         loot: { ...CFG.filter, queue: [...queue.values()].map(it => ({ item: nameOf(it.itemId), ...it })) },
+        activity: botActivityStatus(),
         fpsCap: fpsCap.status(),
       };
     },
@@ -9126,6 +9799,7 @@ function abBuffTimeoutMs() {
       console.log('  ASSIST.aiReplyOn() / ASSIST.aiReplyOff()');
       console.log('  ASSIST.templateReplyOn() / ASSIST.setReplyTemplates(["สวัสดีครับ"])');
       console.log('  ASSIST.aiReplyStatus()             // ดูการตั้งค่า/การตอบในรอบ 1 นาที');
+      console.log('  ASSIST.botActivityStatus()        // ดูงานปัจจุบัน/ตัวบล็อก/เวลาคืบหน้าล่าสุด');
       console.log('  ASSIST.status()  ASSIST.config()  ASSIST.stopAll()');
     },
 
@@ -9859,17 +10533,49 @@ function abBuffTimeoutMs() {
     setFleePlayerDelay(seconds) {
       const value = Number(seconds);
       if (!Number.isFinite(value)) return false;
-      CFG.fleeOnPlayerDelaySec = Math.max(0, Math.min(10, value));
+      CFG.fleeOnPlayerDelaySec = Math.max(0, Math.min(300, value));
       saveConfigDebounced();
       log('🏃 Flee Player delay =', CFG.fleeOnPlayerDelaySec + 's');
       return true;
     },
     setFleePlayerExceptions(...names) {
-      CFG.fleePlayerExceptions = [...new Set(names.map(normalizedPlayerName).filter(Boolean))];
+      CFG.fleePlayerExceptions = [...new Set(names.map(name => String(name || '').trim()).filter(Boolean))];
       resetFleePlayerDelay();
       saveConfigDebounced();
-      log('🏃 Flee Player exceptions =', CFG.fleePlayerExceptions.length ? CFG.fleePlayerExceptions.join(', ') : '(ไม่มี)');
+      log('👤 Player Whitelist =', CFG.fleePlayerExceptions.length ? CFG.fleePlayerExceptions.join(', ') : '(ไม่มี)');
       return CFG.fleePlayerExceptions;
+    },
+    setPlayerEncounterTimes(values = {}) {
+      if (Object.prototype.hasOwnProperty.call(values, 'repeatWindowSec')) {
+        const value = Number(values.repeatWindowSec);
+        if (!Number.isFinite(value)) return false;
+        CFG.fleePlayerRepeatWindowSec = Math.max(1, Math.min(300, value));
+      }
+      if (Object.prototype.hasOwnProperty.call(values, 'repeatTownRestSec')) {
+        const value = Number(values.repeatTownRestSec);
+        if (!Number.isFinite(value)) return false;
+        CFG.fleePlayerRepeatTownRestSec = Math.max(0, Math.min(86400, value));
+      }
+      if (Object.prototype.hasOwnProperty.call(values, 'whitelistTownRestSec')) {
+        const raw = values.whitelistTownRestSec;
+        if (raw === '' || raw == null) CFG.fleePlayerWhitelistTownRestSec = null;
+        else {
+          const value = Number(raw);
+          if (!Number.isFinite(value)) return false;
+          CFG.fleePlayerWhitelistTownRestSec = Math.max(0, Math.min(86400, value));
+        }
+      }
+      saveConfigDebounced();
+      log('👤 Player Encounter เวลา:', 'window=' + CFG.fleePlayerRepeatWindowSec + 's',
+        'พักตามซ้ำ=' + CFG.fleePlayerRepeatTownRestSec + 's',
+        'พัก whitelist=' + (CFG.fleePlayerWhitelistTownRestSec == null ? 'ใช้ค่าตามซ้ำ' : CFG.fleePlayerWhitelistTownRestSec + 's'));
+      return true;
+    },
+    playerEncounterStatus() { return playerEncounter.status(); },
+    skipPlayerEncounterRest() {
+      const skipped = playerEncounter.skipRest();
+      log(skipped ? '⏭ Player Encounter: เลิกพัก → กลับฟาร์มทันที' : 'ℹ️ Player Encounter: ตอนนี้ไม่ได้พักในเมือง');
+      return skipped;
     },
     toggleFleePlayers(on) { CFG.fleeOnPlayerCount = on ? 1 : 0; if (!on) resetFleePlayerDelay(); saveConfigDebounced(); log('🏃 flee ผู้เล่น', CFG.fleeOnPlayerCount ? 'ON' : 'OFF', '(ระยะ ' + CFG.fleeOnPlayerRadius + ' ช่อง)'); },
     setFleeMvp(on, radius) { CFG.fleeOnMvp = !!on; if (radius != null) CFG.fleeOnMvpRadius = Math.max(1, Number(radius) || 20); saveConfigDebounced(); log('🏃 flee MVP/Boss:', CFG.fleeOnMvp ? 'ON' : 'OFF', '(ระยะ ' + CFG.fleeOnMvpRadius + ' ช่อง)'); },
@@ -10926,6 +11632,14 @@ function abBuffTimeoutMs() {
         cursor: pointer; font-size: 13px; line-height: 1; padding: 4px 6px;
       }
       #__assist_bar .hud-action:hover { background: #34465a; color: #fff; }
+      #__assist_activitybar {
+        margin-top:4px; max-width:620px; padding:5px 9px; border:1px solid #3a3f4b; border-radius:7px;
+        background:rgba(20,22,28,.94); color:#8ab4f8; font-size:10px; line-height:1.35;
+        box-shadow:0 2px 8px rgba(0,0,0,.35); white-space:normal; text-align:right;
+      }
+      #__assist_activitybar.waiting { color:#f2ba6d; border-color:#6b5531; }
+      #__assist_activitybar.danger { color:#ef9a9a; border-color:#6a3030; }
+      #__assist_activitybar.idle { color:#9aa0a6; }
       /* popup */
       #__assist_popup {
         display: none; margin-top: 6px; width: 340px; max-height: 70vh;
@@ -11119,6 +11833,7 @@ function abBuffTimeoutMs() {
         <span class="hud-action" data-debug title="เปิด Debug Log">🔍</span>
         <span class="expand" data-settingswindow title="เปิด Settings บน HUD">⚙</span>
       </div>
+      <div id="__assist_activitybar" class="idle" data-botactivity>🤖 กำลังตรวจสถานะ...</div>
       <div id="__assist_popup">
         <div class="popup-head">
           <strong>⚙ RO Rebuild Pure</strong>
@@ -11141,6 +11856,13 @@ function abBuffTimeoutMs() {
           <div class="row"><span class="k">🗺️ แมป / ฟาร์ม</span><span class="v" data-farmmap>?</span></div>
           <div class="row"><span class="k">player_id</span><span class="v" data-pid>?</span></div>
           <div class="row"><span class="k">สถานะ</span><span class="v" data-state>?</span></div>
+          <h4>Bot Activity</h4>
+          <div class="row"><span class="k">กำลังทำอะไร</span><span class="v" data-activity-main>?</span></div>
+          <div class="row"><span class="k">รายละเอียด</span><span class="v" data-activity-detail>?</span></div>
+          <div class="row"><span class="k">เหตุผลที่รอ</span><span class="v" data-activity-blocker>—</span></div>
+          <div class="row"><span class="k">อยู่สถานะนี้</span><span class="v" data-activity-since>0s</span></div>
+          <div class="row"><span class="k">คืบหน้าล่าสุด</span><span class="v" data-activity-progress>0s</span></div>
+          <div class="row"><span class="k">Game Packet ล่าสุด</span><span class="v" data-activity-packet>0s</span></div>
           <div class="row"><span class="k">🌐 Remote Monitor</span><span class="v" data-relay style="color:#9aa0a6">?</span></div>
           <h4>การฟาร์ม</h4>
           <div class="row"><span class="k">ฆ่าได้</span><span class="v" data-kills>0</span></div>
@@ -11316,8 +12038,13 @@ function abBuffTimeoutMs() {
             <h4>👤 Flee ผู้เล่น</h4>
             <div class="btns"><button id="__assist_t_fleeplayer" class="off">Flee Player: OFF</button></div>
             <div class="field"><label>ระยะตรวจผู้เล่น (ช่อง)</label><input type="number" id="__assist_fleeplayerradius" min="1" max="50" placeholder="30"></div>
-            <div class="field"><label>รอก่อนวาร์ปเมื่อเจอผู้เล่น (วินาที, 0=ทันที)</label><input type="number" id="__assist_fleeplayerdelay" min="0" max="10" step="0.5" placeholder="3"></div>
-            <div class="field"><label>ชื่อผู้เล่นที่ไม่ต้องหนี (คั่นด้วยจุลภาค)</label><input type="text" id="__assist_fleeplayerexceptions" placeholder="เช่น FriendA, PartyMember"></div>
+            <div class="field"><label>ดีเลย์วาร์ปปกติ / whitelist หลังจบงาน (วินาที, 0=ทันที)</label><input type="number" id="__assist_fleeplayerdelay" min="0" max="300" step="0.5" placeholder="4"></div>
+            <div class="field"><label>Player Whitelist (Regex) — ไม่หนีและเข้าสู่ flow สนทนา (คั่นด้วยจุลภาค)</label><input type="text" id="__assist_fleeplayerexceptions" placeholder="เช่น ^FriendA$, ^test.*"></div>
+            <div class="field"><label>ช่วงนับผู้เล่นคนเดิมโผล่ใกล้ 5 ช่อง (วินาที)</label><input type="number" id="__assist_fleeplayerrepeatwindow" min="1" max="300" step="1" placeholder="10"></div>
+            <div class="field"><label>พักเมืองเมื่อผู้เล่นคนเดิมโผล่ครบครั้งที่ 3 (วินาที)</label><input type="number" id="__assist_fleeplayerrepeattownrest" min="0" max="86400" step="30" placeholder="300"></div>
+            <div class="field"><label>พักเมืองของ whitelist (วินาที; เว้นว่าง = ใช้ค่าด้านบน)</label><input type="number" id="__assist_fleeplayerwhitelisttownrest" min="0" max="86400" step="30" placeholder="ใช้ค่าพักตามซ้ำ"></div>
+            <div id="__assist_playerencounterstatus" style="font-size:10px;color:#9aa0a6;margin:5px 0">Player Encounter: IDLE</div>
+            <div class="btns"><button id="__assist_playerencounterskiprest" class="off" disabled>⏭ เลิกพักและกลับฟาร์ม</button></div>
             <h4>👑 Flee MVP / Boss</h4>
             <div class="btns"><button id="__assist_t_fleemvp" class="off">Flee MVP/Boss: OFF</button></div>
             <div class="field"><label>ระยะตรวจ MVP/Boss (ช่อง)</label><input type="number" id="__assist_fleemvpradius" min="1" max="100" placeholder="20"></div>
@@ -11894,6 +12621,14 @@ function abBuffTimeoutMs() {
       if (!isNaN(fpd)) ASSIST.setFleePlayerDelay(fpd);
       const fpeList = root.querySelector('#__assist_fleeplayerexceptions').value;
       ASSIST.setFleePlayerExceptions(...fpeList.split(',').map(s => s.trim()).filter(Boolean));
+      const encounterTimes = {};
+      const repeatWindow = root.querySelector('#__assist_fleeplayerrepeatwindow').value.trim();
+      const repeatTownRest = root.querySelector('#__assist_fleeplayerrepeattownrest').value.trim();
+      const whitelistTownRest = root.querySelector('#__assist_fleeplayerwhitelisttownrest').value.trim();
+      if (repeatWindow !== '') encounterTimes.repeatWindowSec = repeatWindow;
+      if (repeatTownRest !== '') encounterTimes.repeatTownRestSec = repeatTownRest;
+      encounterTimes.whitelistTownRestSec = whitelistTownRest;
+      ASSIST.setPlayerEncounterTimes(encounterTimes);
       const fmvpR = parseInt(root.querySelector('#__assist_fleemvpradius').value, 10);
       if (!isNaN(fmvpR)) ASSIST.setFleeMvp(CFG.fleeOnMvp, fmvpR);
       const fmList = root.querySelector('#__assist_fleemonsters').value.trim();
@@ -11902,6 +12637,7 @@ function abBuffTimeoutMs() {
       if (!isNaN(fmr)) CFG.fleeMonsterRadius = fmr;
     });
     root.querySelector('#__assist_t_fleeplayer').addEventListener('click', () => ASSIST.toggleFleePlayers(CFG.fleeOnPlayerCount === 0));
+    root.querySelector('#__assist_playerencounterskiprest').addEventListener('click', () => ASSIST.skipPlayerEncounterRest());
     root.querySelector('#__assist_t_fleemvp').addEventListener('click', () => ASSIST.setFleeMvp(!CFG.fleeOnMvp, CFG.fleeOnMvpRadius));
     // ---- rest wires ----
     root.querySelector('#__assist_restbtn').addEventListener('click', () => CFG.restEnabled ? ASSIST.restOff() : ASSIST.restOn());
@@ -12714,6 +13450,24 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     }
     set('[data-pid]', playerId ? playerId.toString(16) : '?');
     set('[data-state]', isDead ? '☠️ ตาย' : (isResting ? '🪑 นั่งพัก' : (activeWS && activeWS.readyState === 1 ? '🟢 เชื่อมต่อ' : '🔴 ไม่ได้ต่อ')));
+    const activity = botActivityStatus();
+    const activityBar = root.querySelector('[data-botactivity]');
+    if (activityBar) {
+      activityBar.textContent = '🤖 ' + activity.label + (activity.detail ? ' · ' + activity.detail : '');
+      activityBar.className = activity.tone;
+      activityBar.title = (activity.blocker ? activity.blocker + ' · ' : '')
+        + 'สถานะนี้ ' + fmtMs(activity.sinceMs) + ' · ไม่พบความคืบหน้าใหม่ ' + fmtMs(activity.progressAgoMs);
+    }
+    set('[data-activity-main]', activity.label);
+    set('[data-activity-detail]', activity.detail || '—');
+    set('[data-activity-blocker]', activity.blocker || '—');
+    set('[data-activity-since]', fmtMs(activity.sinceMs));
+    set('[data-activity-progress]', fmtMs(activity.progressAgoMs) + ' ที่แล้ว');
+    set('[data-activity-packet]', activity.lastGamePacketAgoMs == null ? 'ยังไม่มี' : fmtMs(activity.lastGamePacketAgoMs) + ' ที่แล้ว');
+    for (const selector of ['[data-activity-main]', '[data-activity-detail]', '[data-activity-blocker]']) {
+      const el = root.querySelector(selector);
+      if (el) el.style.color = activity.tone === 'danger' ? '#ef5350' : (activity.tone === 'waiting' ? '#f2ba6d' : (activity.tone === 'idle' ? '#9aa0a6' : '#8ab4f8'));
+    }
     // ★ Remote Monitor status (relay server) + แสดง/ซ่อนปุ่ม 🌐 ใน mini-bar
     {
       const r = relayStatusInfo();
@@ -12969,6 +13723,29 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     syncInput('#__assist_fleeplayerradius', CFG.fleeOnPlayerRadius);
     syncInput('#__assist_fleeplayerdelay', CFG.fleeOnPlayerDelaySec);
     syncInput('#__assist_fleeplayerexceptions', (CFG.fleePlayerExceptions || []).join(','));
+    syncInput('#__assist_fleeplayerrepeatwindow', CFG.fleePlayerRepeatWindowSec);
+    syncInput('#__assist_fleeplayerrepeattownrest', CFG.fleePlayerRepeatTownRestSec);
+    syncInput('#__assist_fleeplayerwhitelisttownrest', CFG.fleePlayerWhitelistTownRestSec == null ? '' : CFG.fleePlayerWhitelistTownRestSec);
+    const playerEncounterInfo = playerEncounter.status();
+    const playerEncounterStatusEl = root.querySelector('#__assist_playerencounterstatus');
+    if (playerEncounterStatusEl) {
+      const remainingSec = Math.ceil(playerEncounterInfo.remainingMs / 1000);
+      const townPoint = storageKafraPoint();
+      const townInfo = ' · เมืองพัก: ' + (CFG.kafraMap && Number.isFinite(townPoint.warpX) && Number.isFinite(townPoint.warpY)
+        ? CFG.kafraMap + ' @(' + townPoint.warpX + ',' + townPoint.warpY + ')' : 'ยังไม่ตั้งในหน้า Storage');
+      playerEncounterStatusEl.textContent = 'Player Encounter: ' + playerEncounterInfo.state
+        + (playerEncounterInfo.playerName ? ' · ' + playerEncounterInfo.playerName : '')
+        + (playerEncounterInfo.count ? ' · ครั้ง ' + playerEncounterInfo.count + '/3' : '')
+        + (remainingSec > 0 ? ' · เหลือ ' + remainingSec + 's' : '') + townInfo;
+      playerEncounterStatusEl.title = 'แก้เมืองและพิกัดได้ที่ ตั้งค่า → Storage → Kafra';
+      playerEncounterStatusEl.style.color = playerEncounterInfo.state === 'IDLE' ? '#9aa0a6' : '#f2ba6d';
+    }
+    const skipPlayerEncounterRestBtn = root.querySelector('#__assist_playerencounterskiprest');
+    if (skipPlayerEncounterRestBtn) {
+      const canSkip = playerEncounterInfo.state === 'TOWN_REST';
+      skipPlayerEncounterRestBtn.disabled = !canSkip;
+      skipPlayerEncounterRestBtn.className = canSkip ? 'danger' : 'off';
+    }
     syncInput('#__assist_fleemvpradius', CFG.fleeOnMvpRadius);
     syncInput('#__assist_stuckwarp', CFG.stuckWarpOnAbandon);
     syncToggle('#__assist_t_warptoboss', CFG.warpToBoss === true);
@@ -13205,3 +13982,4 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
   log('✅ ติดตั้งแล้ว — เล่นเกมตามปกติ ระบบจะเก็บของและใช้ยาให้เอง');
   log('   พิมพ์ ASSIST.help() เพื่อดูคำสั่งทั้งหมด, ASSIST.status() เพื่อดูสถานะ');
 })();
+}
