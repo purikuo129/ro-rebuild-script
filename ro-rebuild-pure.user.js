@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.3.0
+// @version      1.3.1
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -547,7 +547,7 @@ if (typeof window !== 'undefined') {
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -968,7 +968,7 @@ if (typeof window !== 'undefined') {
     maxChaseDistance: 40,         // ★ เดินไล่ตามมอนได้สูงสุด N ช่อง (ไกลกว่านี้ abandon หาตัวอื่น)
     walkStepDistance: 20,         // ★ สั่งเดินทีละ N ช่อง (game click-walk cap ~20)
     combatTickMs: 200,            // tick loop (มี jitter ±25% เหมือนบอทหลัก)
-    postCombatDelayMs: 800,      // ★ รอ N ms หลังสู้เสร็จ/เก็บของเสร็จ ก่อนทำอย่างอื่น (ดูเป็นธรรมชาติ)
+    postCombatDelayMs: 200,      // ★ รอ N ms หลังสู้เสร็จ/เก็บของเสร็จ ก่อนทำอย่างอื่น (0 = ไม่รอ)
     attackProbeMs: 2000,          // Attack แล้วไม่มีทั้ง hit/miss และ player movement → unreachable
     combatGatProgressTimeoutMs: 3500, // Combat GAT เดินแล้ว route/ระยะไม่คืบ → unreachable
     // มอนบางตัว (เช่น Sleeper) อาจซ่อนตัวชั่วคราว: รอ entity กลับมาแล้ว Attack ซ้ำ แทน abandon ทันที
@@ -10633,7 +10633,14 @@ function abBuffTimeoutMs() {
         radius: SIGHT_RADIUS,
       };
     },
-    setPostCombatDelay(ms) { CFG.postCombatDelayMs = ms; log('⚔️ รอ', ms + 'ms หลังสู้เสร็จ/เก็บของเสร็จ'); },
+    setPostCombatDelay(ms) {
+      const value = Number(ms);
+      if (!Number.isFinite(value) || value < 0) return false;
+      CFG.postCombatDelayMs = value;
+      saveConfigDebounced();
+      log('⚔️ รอ', value + 'ms หลังสู้เสร็จ/เก็บของเสร็จ');
+      return true;
+    },
     // toggle helpers สำหรับ UI
     toggleAntiKS(on) { CFG.antiKS = !!on; log('⚔️ antiKS =', CFG.antiKS); },
     toggleAvoidPlayers(on) { CFG.avoidOtherPlayers = !!on; log('⚔️ avoidOtherPlayers =', CFG.avoidOtherPlayers); },
@@ -11965,6 +11972,8 @@ function abBuffTimeoutMs() {
               <button id="__assist_t_warpfind" class="off">วาร์ปหามอน</button>
               <button id="__assist_t_warptomon" class="off">วาร์ปไปหามอนที่ตี</button>
             </div>
+            <div class="field"><label>ไม่เจอมอนเกินเวลานี้ → วาร์ปสุ่ม (วินาที)</label><input type="number" id="__assist_nomonsterwarpsec" min="1" max="300" step="0.5" placeholder="2"></div>
+            <div class="field"><label>รอหลังจบ Combat/เก็บของเสร็จ (ms, 0=ไม่รอ)</label><input type="number" id="__assist_postcombatdelay" min="0" step="50" placeholder="200"></div>
             <div class="field"><label>stuck abandon N ครั้งใน 60s → วาร์ปสุ่ม (0=ปิด)</label><input type="number" id="__assist_stuckwarp" min="0" max="20"></div>
             <div class="btns">
               <button id="__assist_t_warptoboss" class="off">👹 วาร์ปไปสู้ Mini Boss</button>
@@ -12628,6 +12637,10 @@ function abBuffTimeoutMs() {
       if (!isNaN(postWarpSettle)) CFG.postWarpTargetSettleMs = Math.max(0, Math.min(3000, postWarpSettle));
       const combatGatProgressTimeout = parseInt(root.querySelector('#__assist_combatgatprogresstimeout').value, 10);
       if (!isNaN(combatGatProgressTimeout)) CFG.combatGatProgressTimeoutMs = Math.max(500, Math.min(15000, combatGatProgressTimeout));
+      const noMonsterWarpSec = parseFloat(root.querySelector('#__assist_nomonsterwarpsec').value);
+      if (!isNaN(noMonsterWarpSec)) ASSIST.setNoMonsterWarpSec(noMonsterWarpSec);
+      const postCombatDelay = parseInt(root.querySelector('#__assist_postcombatdelay').value, 10);
+      if (!isNaN(postCombatDelay)) ASSIST.setPostCombatDelay(postCombatDelay);
       const sw = parseInt(root.querySelector('#__assist_stuckwarp').value, 10);
       if (!isNaN(sw)) { CFG.stuckWarpOnAbandon = sw; log('⚔️ stuck abandon → วาร์ปสุ่ม =', sw === 0 ? 'ปิด' : sw + 'ครั้ง'); }
       saveConfigDebounced();
@@ -13795,6 +13808,8 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     syncToggle('#__assist_t_wander', CFG.wanderEnabled);
     syncToggle('#__assist_t_warpfind', CFG.warpFindEnabled);
     syncToggle('#__assist_t_warptomon', CFG.warpToMonster);
+    syncInput('#__assist_nomonsterwarpsec', CFG.noMonsterWarpSec);
+    syncInput('#__assist_postcombatdelay', CFG.postCombatDelayMs);
     // sell config sync
     const sellBtn = root.querySelector('#__assist_sellbtn');
     if (sellBtn) { sellBtn.textContent = 'Sell: ' + (CFG.sellEnabled ? 'ON' : 'OFF') + (sellState !== 'IDLE' ? ' (' + sellState + ')' : ''); sellBtn.className = CFG.sellEnabled ? 'on' : 'off'; }
