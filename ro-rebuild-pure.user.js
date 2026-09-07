@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.3.2
+// @version      1.3.3
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -547,7 +547,7 @@ if (typeof window !== 'undefined') {
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.3.2';
+  const VERSION = '1.3.3';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -2098,6 +2098,7 @@ if (typeof window !== 'undefined') {
   let lastWarpAt = 0;                  // throttle การวาร์ป
   let warpGuardUntil = 0;              // Date.now(): รอ player pos อัปเดตก่อนคำนวณ dist
   let lastWarpPlayerPos = null;        // ★ player.x/y ก่อนวาร์ป (เช็คว่า pos เปลี่ยนไหม)
+  let warpGuardPositionPacketAt = 0;   // timestamp packet ตำแหน่งก่อนส่งวาร์ป
   let postWarpFleeScanPending = false; // หลังยืนยันตำแหน่งใหม่: ตรวจผู้เล่นที่ server ส่งเข้ามาหลังวาร์ป
   let postWarpTargetSettlePending = false; // หลัง guard: เริ่มรอ packet รอบตัวก่อน acquire เป้าแรก
   let postWarpTargetSettleUntil = 0;       // Date.now(): สิ้นสุดช่วงรอ packet SPAWN/ATTACK หลังวาร์ป
@@ -2321,6 +2322,7 @@ if (typeof window !== 'undefined') {
     //   combatLoop จะรอจนกว่า player pos จะเปลี่ยนจากก่อนวาร์ป ก่อนคำนวณ dist/ตี
     warpGuardUntil = nowMs() + 3000;          // หมดเวลา 3s กันค้าง (ถ้า server ไม่ส่ง pos ใหม่)
     lastWarpPlayerPos = (player.x != null) ? { x: player.x, y: player.y } : null;
+    warpGuardPositionPacketAt = lastPlayerPositionPacketAt;
     postWarpFleeScanPending = true;
     postWarpTargetSettlePending = true;
     postWarpTargetSettleUntil = 0;
@@ -3056,14 +3058,17 @@ if (typeof window !== 'undefined') {
     if (now >= warpGuardUntil || !lastWarpPlayerPos) {
       warpGuardUntil = 0;
       lastWarpPlayerPos = null;
+      warpGuardPositionPacketAt = 0;
       beginPostWarpTargetSettle(now);
       if (postWarpFleeScanPending && runPostWarpFleeScan()) return true;
       return now < postWarpTargetSettleUntil;
     }
-    if (player.x === lastWarpPlayerPos.x && player.y === lastWarpPlayerPos.y) return true;
+    const hasFreshPositionPacket = lastPlayerPositionPacketAt > warpGuardPositionPacketAt;
+    if (!hasFreshPositionPacket && player.x === lastWarpPlayerPos.x && player.y === lastWarpPlayerPos.y) return true;
     // ได้ตำแหน่งใหม่แล้ว → ปล่อย flow ต่อได้ทันที
     warpGuardUntil = 0;
     lastWarpPlayerPos = null;
+    warpGuardPositionPacketAt = 0;
     beginPostWarpTargetSettle(now);
     // หลังวาร์ป server จะทยอยส่ง SPAWN/marker; ตรวจซ้ำหนึ่งครั้งทันทีที่ยืนยันตำแหน่งใหม่
     // เพื่อให้ Player Flee มาก่อนการหาเป้าหมายหรือส่ง Attack แรก
@@ -7732,7 +7737,7 @@ function abBuffTimeoutMs() {
 
   // Player Flee มีทางตัดสินใจเดียว: packet event, post-warp scan และ combat loop เรียกที่นี่ร่วมกัน
   // คืน true ระหว่างนับ delay/เก็บของ/cooldown เพื่อห้าม flow อื่น (พัก/เดิน/ตี) แทรก
-  function fleePlayersIfNeeded(reasonSuffix = '') {
+  function fleePlayersIfNeeded(reasonSuffix = '', options = {}) {
     if (!masterBot.enabled()) return false;
     if (RO_PURE_CORE.shouldHoldPlayerFleeForEncounter(playerEncounter.status().state)) {
       resetFleePlayerDelay();
@@ -7757,7 +7762,11 @@ function abBuffTimeoutMs() {
       return false;
     }
     const now = nowMs();
-    const delaySec = Math.max(0, Math.min(300, Number(CFG.fleeOnPlayerDelaySec) || 0));
+    // หลังเพิ่งลงวาร์ป ตำแหน่ง/ผู้เล่นได้รับการยืนยันสดแล้ว: หนีทันทีโดยยังผ่าน
+    // whitelist, encounter hold, loot ownership, cooldown และ Teleport coordinator ชุดเดิม.
+    const delaySec = options.immediate
+      ? 0
+      : Math.max(0, Math.min(300, Number(CFG.fleeOnPlayerDelaySec) || 0));
     const delayMs = Math.round(delaySec * 1000);
     if (!fleePlayerDetectedAt) {
       fleePlayerDetectedAt = now;
@@ -7807,7 +7816,10 @@ function abBuffTimeoutMs() {
     if (encounter.action === 'flee' || encounter.action === 'retreat') return;
     const radius = CFG.fleeOnPlayerRadius || 10;
     if (distance > radius || isFleePlayerIgnored(e) || isFleePlayerException(e)) return;
-    fleePlayersIfNeeded(' (⚡ ทันที)');
+    // หลังตำแหน่งใหม่ยืนยันแล้ว server อาจทยอยส่ง SPAWN ระหว่าง settle window;
+    // ใช้ช่วงเวลาที่มีอยู่เดิมนี้เป็น immediate safety window ไม่เริ่ม timer ใหม่.
+    const postWarpImmediate = nowMs() < postWarpTargetSettleUntil;
+    fleePlayersIfNeeded(postWarpImmediate ? ' (⚡ หลังวาร์ป)' : ' (⚡ ทันที)', { immediate: postWarpImmediate });
   }
 
   // ตรวจซ้ำเพียงรอบเดียวหลังวาร์ปสำเร็จ ใช้ count/doFlee เดียวกับ combat loop
@@ -7815,7 +7827,7 @@ function abBuffTimeoutMs() {
   function runPostWarpFleeScan() {
     if (!masterBot.enabled()) return false;
     postWarpFleeScanPending = false;
-    return fleePlayersIfNeeded(' (หลังวาร์ป)');
+    return fleePlayersIfNeeded(' (หลังวาร์ป)', { immediate: true });
   }
   function acquireTarget(now) {
     // whitelist ว่าง = ตีทุกมอน kind=1 (ตามความหมายของ whitelist); ตั้งค่า = ตีเฉพาะที่ match
@@ -7957,7 +7969,10 @@ function abBuffTimeoutMs() {
   function combatApproachTimedOut(currentTarget, now) {
     const timeoutMs = combatApproachTimeoutMs();
     const startedAt = Number(currentTarget?.approachStartedAt) || 0;
-    const reachedThisApproach = startedAt > 0 && Number(currentTarget?.lastAttackSignalAt) >= startedAt;
+    const reachedThisApproach = startedAt > 0 && (
+      Number(currentTarget?.lastAttackSignalAt) >= startedAt
+      || Number(currentTarget?.followObservedAt) >= startedAt
+    );
     return !!(timeoutMs > 0
       && startedAt > 0
       && !reachedThisApproach
@@ -8010,7 +8025,7 @@ function abBuffTimeoutMs() {
 
     // เดินเฉพาะให้กลับเข้า acquire range; เมื่อเข้าแล้วให้ ATTACK ของเกมเดินตามมอนเอง
     const distanceToWalk = Math.max(0, dist - desiredDistance);
-    if (!recoveryMove && distanceToWalk < 0.5) return false;
+    if (!recoveryMove && dist <= desiredDistance) return false;
     let angle = Math.atan2(m.y - player.y, m.x - player.x);
     // รอบ recovery เดินออกด้านข้างเพื่อหาทางอ้อม; รอบปกติเดินเข้าหาเป้าโดยมี jitter เล็กน้อย
     if (recoveryMove) angle += (Math.random() < 0.5 ? 1 : -1) * (Math.PI / 2);
@@ -8018,8 +8033,16 @@ function abBuffTimeoutMs() {
     const step = recoveryMove
       ? Math.min(6, Math.max(3, distanceToWalk))  // ก้าวหลบสั้น ๆ ไม่วิ่งออกนอกเส้นทางไกลเกินไป
       : Math.min(distanceToWalk, CFG.walkStepDistance);
-    const tx = player.x + Math.cos(angle) * step;
-    const ty = player.y + Math.sin(angle) * step;
+    let tx = player.x + Math.cos(angle) * step;
+    let ty = player.y + Math.sin(angle) * step;
+    // MOVE ใช้พิกัดจำนวนเต็ม: ระยะที่เกิน acquire เพียงเศษช่องอาจ round กลับเป็น
+    // ช่องปัจจุบันได้. เลือกช่อง grid ถัดไปในทิศเป้าแทน โดยไม่เปลี่ยน threshold ของผู้ใช้.
+    if (!recoveryMove && Math.round(tx) === Math.round(player.x) && Math.round(ty) === Math.round(player.y)) {
+      const fromX = Math.round(player.x), fromY = Math.round(player.y);
+      const towardX = Math.round(m.x), towardY = Math.round(m.y);
+      tx = fromX + Math.sign(towardX - fromX);
+      ty = fromY + Math.sign(towardY - fromY);
+    }
     if (sendMove(tx, ty)) { log(recoveryMove ? '🚶 แก้ทางไปหา' : '🚶 เดินไปหา', m.name || m.id.toString(16), '@(', Math.round(tx), Math.round(ty) + ') dist=' + dist.toFixed(1) + ' step=' + Math.round(step)); return 'WALKING'; }
     return false;
   }
@@ -8069,9 +8092,13 @@ function abBuffTimeoutMs() {
     // Player Encounter เป็นเจ้าของลำดับ จบงาน → นั่ง/คุย → เมือง → พัก → กลับฟาร์ม.
     // WHITELIST_WORK คืน owned=false เฉพาะตอนต้องปล่อย combat/loot/AI เดิมให้จบ.
     if (tickPlayerEncounter(now).owned) return;
+    // หลังวาร์ปต้องรอพิกัดตัวเองที่ server ยืนยัน แล้วทำ safety scan แบบไม่ใช้
+    // fleeOnPlayerDelaySec ก่อน Flee ปกติ มิฉะนั้น Flee ปกติจะยึด loop และหน่วงซ้ำ.
+    if (postWarpFleeScanPending && isWarpGuardActive(now)) return;
     // Player Flee เป็น safety flow อิสระจาก Combat: OFF ก็ยังต้องหนีผู้เล่นที่ยืนนิ่งอยู่ได้
     // AB Buff / Storage hold อยู่ภายใน fleePlayersIfNeeded แล้ว
-    if (!isDead && activeWS && activeWS.readyState === 1 && fleePlayersIfNeeded()) return;
+    if (!isDead && activeWS && activeWS.readyState === 1
+      && fleePlayersIfNeeded('', { immediate: now < postWarpTargetSettleUntil })) return;
     // Self/ally และ Support ผู้เล่นอื่นใช้ queue เดียว และเป็นอิสระจาก
     // target acquisition. Outside Collector, preserve Flee's safety priority.
     if (tryIdleSupportSkill(now)) return;
@@ -8569,6 +8596,8 @@ function abBuffTimeoutMs() {
           if (followIdleMs >= FOLLOW_NO_COMBAT_STALL_MS) {
             target.forceApproachWalk = true;
             target.lastAttackAt = 0;
+            target.approachStartedAt = now;
+            target.followObservedAt = 0;
             resetWalkProgress();
             resetCombatGatChase();
             log('🧭 Attack-follow หยุด → Movement Planner เดินต่อ');
@@ -8578,6 +8607,8 @@ function abBuffTimeoutMs() {
           if (followNoCombatMs >= FOLLOW_NO_COMBAT_MAX_MS) {
             target.forceApproachWalk = true;
             target.lastAttackAt = 0;
+            target.approachStartedAt = now;
+            target.followObservedAt = 0;
             resetWalkProgress();
             resetCombatGatChase();
             log('🧭 Attack-follow ยังไม่เริ่มตี → Movement Planner เดินต่อ');
@@ -8591,6 +8622,7 @@ function abBuffTimeoutMs() {
           if (sendAttack(target.id)) {
             target.lastAttackAt = now;
             target.attackProbeAt = now;
+            target.approachStartedAt = now;
             target.attackProbePos = { x: player.x, y: player.y };
             target.followObservedAt = 0;
             target.lastFollowPos = { x: player.x, y: player.y };
@@ -9406,7 +9438,8 @@ function abBuffTimeoutMs() {
       else if (target.followObservedAt) phase = 'follow';
       else { phase = 'attack_wait'; waitReason = 'รอ hit/miss/movement จาก server'; }
     } else if (Number.isFinite(Number(distance)) && distance > CFG.maxAcquireDistance) phase = 'walking';
-    if (!(target.lastAttackSignalAt >= target.approachStartedAt) && target.approachStartedAt && combatApproachTimeoutMs() > 0
+    if (!(target.lastAttackSignalAt >= target.approachStartedAt || target.followObservedAt >= target.approachStartedAt)
+      && target.approachStartedAt && combatApproachTimeoutMs() > 0
       && ['acquired', 'walking', 'follow', 'attack_wait'].includes(phase)) {
       const remainingMs = Math.max(0, combatApproachTimeoutMs() - (now - target.approachStartedAt));
       const timerText = 'กำลังเข้าหาเป้า · วาร์ปใน ' + (remainingMs / 1000).toFixed(1) + 's หากยังเริ่มตีไม่ได้';
@@ -10678,6 +10711,14 @@ function abBuffTimeoutMs() {
     setFleeMvp(on, radius) { CFG.fleeOnMvp = !!on; if (radius != null) CFG.fleeOnMvpRadius = Math.max(1, Number(radius) || 20); saveConfigDebounced(); log('🏃 flee MVP/Boss:', CFG.fleeOnMvp ? 'ON' : 'OFF', '(ระยะ ' + CFG.fleeOnMvpRadius + ' ช่อง)'); },
     setRanged(range) { CFG.rangedAttackRange = range; log('🏹 ranged range =', range, range ? '' : '(ใช้ attackRange)'); },
     setAttackRange(r) { CFG.attackRange = r; log('⚔️ attackRange =', r); },
+    setMaxAcquireDistance(distance) {
+      const value = Number(distance);
+      if (!Number.isFinite(value) || value < 1) return false;
+      CFG.maxAcquireDistance = Math.min(100, value);
+      saveConfigDebounced();
+      log('⚔️ ระยะส่ง Attack-follow =', CFG.maxAcquireDistance + ' ช่อง');
+      return true;
+    },
     setAttackProbe(ms) { CFG.attackProbeMs = Math.max(1000, Number(ms) || 3000); log('⚔️ Attack probe =', CFG.attackProbeMs + 'ms'); },
     setHiddenWaitMonsters(...namesOrIds) {
       CFG.hiddenWaitMonsters = namesOrIds.filter(x => x !== '' && x != null);
@@ -12046,6 +12087,7 @@ function abBuffTimeoutMs() {
             <div class="btns"><button id="__assist_t_hiddensight" class="on">👁️ Sight เมื่อมอนซ่อน</button></div>
             <div id="__assist_hiddensightstatus" style="font-size:10px;color:#9aa0a6;margin-top:-3px;line-height:1.45">ใช้ Sight เฉพาะเมื่อมอนใน hidden wait ใช้ Cloaking จริง · ระยะ 3 ช่อง</div>
             <div class="field"><label>ระยะโจมตี (ช่อง) — นักธนูตั้ง >2 เพื่อตีไกล</label><input type="number" id="__assist_attackrange" min="0" max="15"></div>
+            <div class="field"><label>ระยะส่ง Attack-follow ทันที (ช่อง)</label><input type="number" id="__assist_maxacquiredistance" min="1" max="100" step="1"></div>
             <div class="btns">
               <button id="__assist_t_antiks" class="on">antiKS</button>
               <button id="__assist_t_avoidp" class="on">avoidPlayers</button>
@@ -12714,6 +12756,8 @@ function abBuffTimeoutMs() {
     root.querySelector('#__assist_applycombat').addEventListener('click', () => {
       const r = parseInt(root.querySelector('#__assist_attackrange').value, 10);
       if (!isNaN(r)) { if (r > 2) ASSIST.setRanged(r); else ASSIST.setAttackRange(r || 2); }
+      const maxAcquireDistance = parseFloat(root.querySelector('#__assist_maxacquiredistance').value);
+      if (!isNaN(maxAcquireDistance)) ASSIST.setMaxAcquireDistance(maxAcquireDistance);
       ASSIST.setHiddenWaitMonsters(...parseList('#__assist_hiddenwaitmonsters'));
       const hws = parseFloat(root.querySelector('#__assist_hiddenwaitsec').value);
       if (!isNaN(hws)) ASSIST.setHiddenWaitSec(hws);
@@ -13837,6 +13881,7 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
       hiddenSightStatus.style.color = CFG.hiddenSightEnabled === false ? '#9aa0a6' : (sightRemaining > 0 ? '#27ae60' : '#8ab4f8');
     }
     syncInput('#__assist_attackrange', CFG.rangedAttackRange > 0 ? CFG.rangedAttackRange : CFG.attackRange);
+    syncInput('#__assist_maxacquiredistance', CFG.maxAcquireDistance);
     syncInput('#__assist_antikswindow', CFG.antiKSCooldownMs);
     syncInput('#__assist_avoidplayerradius', CFG.playerProximityRadius);
     syncInput('#__assist_postwarpsettle', CFG.postWarpTargetSettleMs);

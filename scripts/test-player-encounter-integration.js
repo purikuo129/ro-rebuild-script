@@ -31,7 +31,7 @@ assert.match(source, /Math\.min\(300, Number\(CFG\.fleeOnPlayerDelaySec\)/,
   'the runtime delay must honor the full range exposed by the UI');
 assert.match(source, /if \(!CFG\.fleeOnPlayerCount \|\| CFG\.fleeOnPlayerCount <= 0\) return;/,
   'the repeat encounter flow must remain controlled by the Flee Player toggle');
-assert.match(source, /function fleePlayersIfNeeded\(reasonSuffix = ''\) \{[\s\S]{0,300}shouldHoldPlayerFleeForEncounter\(playerEncounter\.status\(\)\.state\)/,
+assert.match(source, /function fleePlayersIfNeeded\(reasonSuffix = '', options = \{\}\) \{[\s\S]{0,300}shouldHoldPlayerFleeForEncounter\(playerEncounter\.status\(\)\.state\)/,
   'the shared Flee Player decision path must hold while Player Encounter owns the town/rest flow');
 assert.match(source, /playerEncounter = RO_PURE_CORE\.createPlayerEncounterController\(/,
   'the live userscript must use the behavior-tested encounter interface');
