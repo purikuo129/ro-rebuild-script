@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      2.0.0-rc.1
+// @version      2.0.0-rc.3
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -134,6 +134,30 @@ const RO_PURE_CORE = (() => {
 
   function shouldHoldPlayerFleeForEncounter(state) {
     return !!state && state !== 'IDLE' && state !== 'WHITELIST_WORK';
+  }
+
+  function shouldHandoffGatToAttackFollow(context = {}) {
+    const distance = Number(context.distance);
+    const acquireDistance = Number(context.acquireDistance);
+    const arriveRadius = Number(context.gatArriveRadius);
+    if (!Number.isFinite(distance) || !Number.isFinite(acquireDistance) || acquireDistance < 0) return false;
+    if (distance <= acquireDistance) return true;
+    // GAT เดินบน grid และถือว่าถึง waypoint เมื่ออยู่ใน arrival radius อยู่แล้ว.
+    // เมื่อเข้าเขตเดียวกันให้ server รับ Attack-follow ต่อ แทนการยิง MOVE ปลายทางเดิมซ้ำ.
+    return acquireDistance > 0 && !!context.gatEnabled
+      && Number.isFinite(arriveRadius) && arriveRadius > 0
+      && distance <= acquireDistance + arriveRadius;
+  }
+
+  function resolveDefeatedTargetPosition(deadEntity, activeTarget) {
+    // 0x0f is authoritative for death. Prefer its entity coordinates, but
+    // retain the active target as a fallback because a position update can
+    // race the death packet.
+    for (const entity of [deadEntity, activeTarget]) {
+      const x = Number(entity?.x), y = Number(entity?.y);
+      if (Number.isFinite(x) && Number.isFinite(y)) return { x, y };
+    }
+    return null;
   }
 
   function decideLootQueueHomeReturn(context = {}) {
@@ -744,6 +768,8 @@ const RO_PURE_CORE = (() => {
   return {
     matchesPlayerWhitelist,
     shouldHoldPlayerFleeForEncounter,
+    shouldHandoffGatToAttackFollow,
+    resolveDefeatedTargetPosition,
     decideLootQueueHomeReturn,
     createAutomationOrchestrator,
     createBotActivityReporter,
@@ -762,7 +788,7 @@ if (typeof window !== 'undefined') {
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '2.0.0-rc.1';
+  const VERSION = '2.0.0-rc.3';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -3567,6 +3593,14 @@ if (typeof window !== 'undefined') {
     }
     log('🎯 คิวเก็บ', nameOf(d.itemId), 'drop', d.dropId, '@(', d.x.toFixed(1), d.y.toFixed(1) + ')');
   }
+  function rememberRecentKillPosition(position, at = Date.now()) {
+    if (!position) return false;
+    const x = Number(position.x), y = Number(position.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    recentKillPos.push({ x, y, t: at });
+    while (recentKillPos.length > KILL_POS_MAX) recentKillPos.shift();
+    return true;
+  }
   function markCombat() { lastCombatAt = Date.now(); }
   function getLootPostKillSettleMs() {
     return Math.max(0, Number(CFG.lootPostKillSettleMs) || 0);
@@ -4007,23 +4041,8 @@ if (typeof window !== 'undefined') {
         if (baseDelta > 0) stats.baseExpGained += baseDelta;
         if (jobDelta > 0) stats.jobExpGained += jobDelta;
       }
-      // ★ จดพิกัดมอนที่เราฆ่า — ใช้ target หรือ entity ล่าสุดที่เราตี
-      //   สำคัญสำหรับนักธนู: ยิงมอนตายไกล → ของตกที่พิกัดมอน ไม่ใช่ที่ตัวเรา
-      let killX = null, killY = null;
-      if (target && target.x != null) { killX = target.x; killY = target.y; }
-      else if (target) {
-        // target อาจถูก abandon แล้ว → หาจาก entity ล่าสุดที่เราตี (_lastEngagedByMeAt)
-        let bestT = 0;
-        for (const e of entities.values()) {
-          if (e._lastEngagedByMeAt && e._lastEngagedByMeAt > bestT && e.x != null) {
-            bestT = e._lastEngagedByMeAt; killX = e.x; killY = e.y;
-          }
-        }
-      }
-      if (killX != null && killY != null) {
-        recentKillPos.push({ x: killX, y: killY, t: Date.now() });
-        while (recentKillPos.length > KILL_POS_MAX) recentKillPos.shift();
-      }
+      // พิกัดมอนตายบันทึกจาก 0x0f ซึ่งเป็น packet ยืนยันการตายเท่านั้น.
+      // EXP อาจมาทีหลัง target ถูกล้างแล้ว จึงใช้แค่ re-check drop ที่มาก่อน EXP.
       for (const d of recentDrops.values()) tryClaim(d);
     }
     // 0x51 ITEM_DROP: ของตก
@@ -4845,6 +4864,16 @@ if (typeof window !== 'undefined') {
     else if (op === 0x0f && u.length >= 6 && u[5] === 3) {
       const id = u32(u, 1);
       const e = entities.get(id);
+      // ต้องจำตำแหน่งก่อนล้าง target: packet EXP อาจมาหลัง 0x0f จึงห้าม
+      // พึ่ง target ใน EXP handler เพื่อผูก drop ของนักธนู/มอนที่ตายไกล.
+      const killedTarget = !!target && target.id === id;
+      const killedTargetPosition = killedTarget
+        ? RO_PURE_CORE.resolveDefeatedTargetPosition(e, target)
+        : null;
+      if (rememberRecentKillPosition(killedTargetPosition)) {
+        // ITEM_DROP อาจมาถึงก่อน death packet; หลังรู้ตำแหน่งแล้ว re-check ทันที.
+        for (const d of recentDrops.values()) tryClaim(d);
+      }
       if (e) {
         e.alive = false;
         // ★ ถ้าเป็น boss/mini boss ที่ตาย → ล้าง bossAlertedIds เพื่อ alert ใหม่ตอนเกิดใหม่
@@ -4858,7 +4887,7 @@ if (typeof window !== 'undefined') {
       if (e && e.kind === 1) {
         stats.kills++;
       }
-      if (target && target.id === id) {
+      if (killedTarget) {
         abandonTarget('ฆ่าได้', false); target = null;
         // ล็อกคำสั่ง combat ชั่วคราว รอ packet drop ของ kill นี้ก่อน
         beginLootSettlement(nowMs());
@@ -8378,6 +8407,7 @@ function abBuffTimeoutMs() {
   }
   // เดินไปหามอน — ใช้ GAT A* เมื่อพร้อม; ปิด/ยังไม่มี GAT จึง fallback เป็นเส้นตรงเดิม
   let lastWalkToTargetAt = 0;
+  const COMBAT_MOVE_RETRY_MS = 800;
   const STUCK_NO_MOVE_MS = 5000;
   const STUCK_RECOVERY_GRACE_MS = 3000;
   const abandonCooldown = new Map();   // entityId → timestamp ที่ abandon (กันเลือกตัวเดิมซ้ำเลย)
@@ -8424,6 +8454,8 @@ function abBuffTimeoutMs() {
 
     const noMoveMs = now - lastWalkProgressAt;
     let recoveryMove = false;
+    // MOVE แรกอาจถูกทิ้งโดย server โดยไม่มี position packet ตอบกลับ จึง retry ตาม
+    // cadence เดียวกับ GAT ขณะ timer วาร์ปรวมยังนับต่อ แทนการยืนรอ position อย่างเดียว.
     if (noMoveMs >= STUCK_NO_MOVE_MS) {
       if (stuckRecoveryAt && now - stuckRecoveryAt >= STUCK_RECOVERY_GRACE_MS) {
         log('🚧 stuck: ไม่มี player position update ' + (noMoveMs / 1000).toFixed(1) + 's @ dist ' + dist.toFixed(1));
@@ -8441,9 +8473,7 @@ function abBuffTimeoutMs() {
       } else {
         return false;
       }
-    } else if (!playerMoved && lastWalkToTargetAt > 0) {
-      return false; // ส่ง MOVE แล้วรอ server ยืนยันการขยับก่อน ไม่ spam ทุก 800ms
-    } else if (now - lastWalkToTargetAt < 800) {
+    } else if (now - lastWalkToTargetAt < COMBAT_MOVE_RETRY_MS) {
       return false;
     }
 
@@ -9044,8 +9074,14 @@ function abBuffTimeoutMs() {
           }
           return;
         }
-        // ยังไม่ได้เริ่ม Attack-follow: เข้า acquire range แล้วส่ง ATTACK หนึ่งครั้ง
-        if (dist <= CFG.maxAcquireDistance) {
+        // ยังไม่ได้เริ่ม Attack-follow: GAT ใช้ arrival tolerance เดิมของตัวเองก่อน
+        // handoff ให้ server เดิน/ตีต่อ จึงไม่วนส่ง waypoint สุดท้ายเมื่ออยู่ชิดขอบระยะ.
+        if (RO_PURE_CORE.shouldHandoffGatToAttackFollow({
+          distance: dist,
+          acquireDistance: CFG.maxAcquireDistance,
+          gatEnabled: combatGatChaseEnabled(),
+          gatArriveRadius: COMBAT_GAT_ARRIVE_RADIUS,
+        })) {
           if (sendAttack(target.id)) {
             target.lastAttackAt = now;
             target.attackProbeAt = now;
@@ -9329,7 +9365,7 @@ function abBuffTimeoutMs() {
       log('🚧 Combat GAT: เส้นทางไม่คืบ', (progressTimeoutMs / 1000).toFixed(1) + 's', '@ dist', distance.toFixed(1));
       return 'STUCK';
     }
-    if (now - combatGatLastMoveAt < 800) return 'WALKING';
+    if (now - combatGatLastMoveAt < COMBAT_MOVE_RETRY_MS) return 'WALKING';
 
     let best = combatGatPathIdx;
     for (let i = combatGatPath.length - 1; i > best; i--) {

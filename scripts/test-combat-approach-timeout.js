@@ -13,6 +13,7 @@ assert(walkMatch, 'หา walkToTarget ไม่พบ');
   const walkToTarget = Function('CFG', 'player', 'moves', `
     let lastWalkPos = null, lastWalkProgressAt = 0, stuckRecoveryAt = 0;
     let stuckRecoveryUsed = false, lastWalkToTargetAt = 0;
+    const COMBAT_MOVE_RETRY_MS = 800;
     const STUCK_NO_MOVE_MS = 5000, STUCK_RECOVERY_GRACE_MS = 3000;
     const combatGatChaseStep = () => null;
     const sendMove = (x, y) => { moves.push({ x, y }); return true; };
@@ -33,6 +34,39 @@ assert(timedOutMatch, 'หา combatApproachTimedOut ไม่พบ');
 
 function makeHelpers(CFG) {
   return Function('CFG', timeoutMatch[1] + '; ' + timedOutMatch[1] + '; return { combatApproachTimeoutMs, combatApproachTimedOut };')(CFG);
+}
+
+// Full direct-walk timeline when GAT is unavailable. A MOVE packet can be lost
+// or rejected without producing a player-position packet; Combat must keep
+// issuing the existing throttled walk command while the overall warp timer runs.
+{
+  const player = { x: 0, y: 0 };
+  const moves = [];
+  let tickNow = 0;
+  const walkToTarget = Function('CFG', 'player', 'moves', 'clock', `
+    let lastWalkPos = null, lastWalkProgressAt = 0, stuckRecoveryAt = 0;
+    let stuckRecoveryUsed = false, lastWalkToTargetAt = 0;
+    const COMBAT_MOVE_RETRY_MS = 800;
+    const STUCK_NO_MOVE_MS = 5000, STUCK_RECOVERY_GRACE_MS = 3000;
+    const combatGatChaseStep = () => null;
+    const sendMove = (x, y) => { moves.push({ at: clock(), x, y }); return true; };
+    const log = () => {};
+    ${walkMatch[1]}
+    return walkToTarget;
+  `)({ maxAcquireDistance: 15, walkStepDistance: 20 }, player, moves, () => tickNow);
+  const helpers = makeHelpers({ warpToMonsterApproachTimeoutSec: 5 });
+  const target = { approachStartedAt: 1000, lastAttackSignalAt: 0, followObservedAt: 0 };
+  const monster = { id: 1, name: 'mob', x: 19, y: 0 };
+  let warpAt = 0;
+  for (tickNow = 1000; tickNow <= 6000; tickNow += 200) {
+    if (helpers.combatApproachTimedOut(target, tickNow)) { warpAt = tickNow; break; }
+    walkToTarget(tickNow, monster, 15);
+  }
+  assert.strictEqual(warpAt, 6000, 'fixture ต้องไปถึง overall approach timeout');
+  assert(moves.length >= 5,
+    'ก่อนวาร์ป direct-walk ต้องส่ง MOVE ต่อเนื่องตาม throttle เดิม ไม่ใช่ส่งครั้งเดียวแล้วยืนรอ');
+  const largestGap = Math.max(...moves.slice(1).map((move, index) => move.at - moves[index].at));
+  assert(largestGap <= 1000, 'ห้ามมีช่วงเงียบเกิน 1s ระหว่าง MOVE ขณะยังจับเวลาวาร์ป');
 }
 
 {

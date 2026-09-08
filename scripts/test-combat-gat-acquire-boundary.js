@@ -52,6 +52,7 @@ assert(Math.hypot(result.destination.x - player.x, result.destination.y - player
     `
       const gatFlipY = false;
       const MOVE_MAX_DIST = 16;
+      const COMBAT_MOVE_RETRY_MS = 800;
       const log = () => {};
       const dbg = () => {};
       ${chaseMatch[1]}
@@ -67,6 +68,8 @@ assert(Math.hypot(result.destination.x - player.x, result.destination.y - player
   assert.strictEqual(combatGatChaseStep(1000, { id: 1, name: 'mob', x: 19, y: 0 }, 15), 'WALKING');
   assert.strictEqual(moves.length, 1, 'GAT ระยะ 15–19 ต้องส่ง MOVE ไม่ใช่คืน WALKING โดยไม่มีคำสั่ง');
   assert.notDeepStrictEqual(moves[0], { x: 0, y: 0 }, 'GAT ห้ามส่ง MOVE กลับมายังช่องปัจจุบัน');
+  assert.strictEqual(combatGatChaseStep(1800, { id: 1, name: 'mob', x: 19, y: 0 }, 15), 'WALKING');
+  assert.strictEqual(moves.length, 2, 'GAT ต้อง retry MOVE ตาม cadence เดิมเมื่อ position packet ยังไม่ขยับ');
 }
 
 console.log('combat GAT acquire-boundary regression: PASS');
