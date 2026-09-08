@@ -22,11 +22,11 @@ assert.match(settledFlow, /setActiveJobTimer\('returnHomeNotBefore', now \+ warp
 assert.match(settledFlow, /if \(now < activeJob\.returnHomeNotBefore\) \{[\s\S]{0,260}return;[\s\S]{0,100}\}[^]*?returnHome\(\);/,
   'collector must wait before home only after finding no successor');
 
-const expiryStart = source.indexOf('if (now > job.expiresAt) {');
+const expiryStart = source.indexOf('if (drainingNow > drainingJob.expiresAt) {');
 const expiryEnd = source.indexOf('if (isDead)', expiryStart);
 assert(expiryStart >= 0 && expiryEnd > expiryStart, 'expired-job flow seam not found');
 const expiryFlow = source.slice(expiryStart, expiryEnd);
-assert.match(expiryFlow, /markDeferredVisibilityPass\(job\); send\(\{ type: 'nack', id: job\.id, claimToken: activeJob\.claimToken \}\); activeJob = null; idleReturnAt = now \+ warpCooldownMs\(\); return;/,
+assert.match(expiryFlow, /markDeferredVisibilityPass\(drainingJob\);[\s\S]{0,120}send\(\{ type: 'nack', id: drainingJob\.id, claimToken: activeJob\.claimToken \}\);[\s\S]{0,120}activeJob = null;[\s\S]{0,120}idleReturnAt = drainingNow \+ warpCooldownMs\(\);[\s\S]{0,80}return;/,
   'an expired job with no successor must schedule the existing home-return delay');
 
 console.log('loot-queue-return-home-delay regression: PASS');

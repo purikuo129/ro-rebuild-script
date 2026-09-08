@@ -17,6 +17,12 @@ assert.doesNotMatch(source, /lootQueueNearbySettleMs|nearbySettleMs|failureNextJ
 assert.match(source, /lootQueuePickupRetryCount: 3, \/\/ จำนวนคำสั่ง pickup รวมทั้งหมด/);
 assert.match(source, /const delayMs = \(!replacingSettledJob && !sameMap && currentMap === CFG\.lootQueueHomeMap\) \? claimDelayMs\(\) : 0;/,
   'claim delay must apply only from the configured home map when a warp is needed');
+assert.match(source, /const claimedAt = nowMs\(\);[\s\S]{0,900}claimDelayUntil: claimedAt \+ delayMs/,
+  'claim delay must use an absolute deadline created when claimed arrives so Combat/normal Loot drain counts in parallel');
+const combatSectionStart = source.indexOf('const combatLoop = setInterval(() => {');
+const combatSectionEnd = source.indexOf('// ============================================================\n  //  GAT', combatSectionStart);
+assert.doesNotMatch(source.slice(combatSectionStart, combatSectionEnd), /claimDelayUntil\s*=/,
+  'finishing the current Combat target must not restart the claim delay');
 assert.match(source, /done\.settleUntil = nowMs\(\);[\s\S]{0,160}เก็บสำเร็จ → มอง job คิวถัดไปทันที/,
   'a successful pickup must chain immediately');
 assert.match(source, /const pickupResponseWaitMs = \(\) => \{[\s\S]{0,180}CFG\.lootQueueActionTimeoutMs[\s\S]{0,180}\};/,

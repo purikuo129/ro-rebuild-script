@@ -3,6 +3,31 @@
 บันทึกนี้สรุปเฉพาะพฤติกรรมและค่าตั้งที่ผู้ใช้เห็นของ **RO Rebuild Pure**
 โดยรายละเอียด refactor หรือทุกไฟล์ที่เปลี่ยน ให้ดูจาก Git history เพิ่มเติม
 
+## [2.0.0-rc.1] — 2026-09-07
+
+### Added
+
+- เพิ่ม Automation Orchestrator เป็นเจ้าของ Action lane กลางสำหรับ Player Flee/Retreat, Whitelist, AB Buff, Storage, Loot Queue Collector, normal Loot, Combat, Rest และ monster search
+- หน้า Bot Activity แสดง Orchestrator owner, phase/mode, flow ที่ block อยู่ และ pending intent พร้อม `ASSIST.orchestratorStatus()` สำหรับตรวจจาก Console
+- เพิ่ม regression matrix สำหรับการ drain/preempt ระหว่าง Collector, Combat, Loot, Rest, Storage, AB Buff และ Player Encounter
+
+### Changed
+
+- Intent หลาย flow ถูกเก็บแยกกันตาม priority จึงกลับมาทำ flow เดิมต่อได้เมื่อ flow ที่แซงหน้าจบ แทนการเขียนทับ intent เดิม
+- AB Buff และ hard-full Storage แซง Collector โดยคืนงานที่ยังไม่สำเร็จ; Loot Queue job ปกติให้ Combat target และ normal Loot เดิม drain จบก่อน Collector เริ่มเคลื่อนที่
+- ค่า “รอหลังรับงานก่อนวาร์ป” เริ่มนับจาก `claimed` ต่อเนื่องระหว่าง Combat/normal Loot drain และไม่เริ่มนับใหม่เมื่องานเดิมจบ
+- Whitelist ยอมให้งานที่เริ่มแล้วของ Combat, normal Loot, Collector, AB Buff หรือ Storage จบ แต่กันการ claim/เริ่มงานใหม่ก่อนเข้าสู่ช่วงสนทนา
+- normal Loot ที่เริ่มแล้วจบ atomic action ก่อน Collector และ Auto Buff ไม่ส่ง item packet แทรกระหว่าง Collector หรือ teleport guard
+
+### Fixed
+
+- แก้ Collector + Combat ยืนรอวาร์ปกลับจุดรอหลังจบ Loot Queue ทั้งที่อยู่แมปฟาร์มแล้ว โดยคืนสิทธิ์ให้ Combat ทันที
+- แก้จุดรอ `-999,-999` ในแมปเดิมถูกนำไปตรวจระยะจนยืนยันไม่สำเร็จและ retry ซ้ำ; วาร์ปสุ่มในแมปเดิมใช้ flow fire-and-release ของ Teleport Coordinator
+- แก้วงจรรอถาวรเมื่อ Collector, AB Buff หรือ Storage ทำงานพร้อม Player Encounter
+- รักษา Player Retreat owner ตั้งแต่วาร์ปกลับเมือง ผ่านช่วงพัก จนกลับฟาร์มสำเร็จ เพื่อไม่ให้ Flee Player แทรกวาร์ปซ้ำ
+- hard-full Storage ปลด Collector ที่เก็บต่อไม่ได้ และล้าง Combat target ก่อนเริ่มวาร์ปไป Kafra
+- แก้ Collector ทิ้งมอนปัจจุบันทันทีเมื่อ Loot Queue job เข้ามา และต่อ lease ระหว่างรอ Combat/normal Loot เดิมจบ
+
 ## [1.3.2] — 2026-09-07
 
 ### Added

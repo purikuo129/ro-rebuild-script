@@ -10,8 +10,10 @@ const source = fs.readFileSync('RO Rebuild Pure.js', 'utf8');
 const published = fs.readFileSync('ro-rebuild-pure.user.js', 'utf8');
 
 assert.strictEqual(published, source, 'published userscript must match the source copy');
-assert.match(source, /@version\s+1\.3\.2/);
-assert.match(source, /const VERSION = '1\.3\.2';/);
+const metadataVersion = source.match(/@version\s+([^\s]+)/)?.[1];
+const runtimeVersion = source.match(/const VERSION = '([^']+)';/)?.[1];
+assert(metadataVersion, 'userscript metadata ต้องมี version');
+assert.strictEqual(runtimeVersion, metadataVersion, 'version ใน runtime ต้องตรงกับ userscript metadata');
 assert.match(source, /'skillEnabled', 'skills', 'disabledSkillIds', 'skillCommandGapMs'/,
   'the global gap must persist');
 assert.match(source, /skillCommandGapMs: 1500,\s*\/\/ เว้นเฉพาะระหว่างสกิลคนละชนิด/,

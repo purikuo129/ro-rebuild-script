@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RO Rebuild Pure
 // @namespace    ro-rebuild-pure
-// @version      1.3.3
+// @version      2.0.0-rc.1
 // @description  ผู้ช่วยเล่นเว็บ client RO — auto-loot, auto-heal, auto-combat, auto-rest (Unity WebGL / WebSocket)
 // @match        *://*.rayrag.com/*
 // @run-at       document-start
@@ -136,6 +136,210 @@ const RO_PURE_CORE = (() => {
     return !!state && state !== 'IDLE' && state !== 'WHITELIST_WORK';
   }
 
+  function decideLootQueueHomeReturn(context = {}) {
+    const currentMap = String(context.currentMap || '');
+    const homeMap = String(context.homeMap || '');
+    const farmMap = String(context.farmMap || '');
+    const homeX = Number(context.homeX);
+    const homeY = Number(context.homeY);
+    const hasPlayerPosition = context.playerX != null && context.playerY != null
+      && Number.isFinite(Number(context.playerX)) && Number.isFinite(Number(context.playerY));
+    const playerX = hasPlayerPosition ? Number(context.playerX) : null;
+    const playerY = hasPlayerPosition ? Number(context.playerY) : null;
+    const randomHome = homeX === -999 && homeY === -999;
+    if (!homeMap) return { action: 'RELEASE', randomHome };
+    if (context.combatEnabled && currentMap === homeMap && homeMap === farmMap) {
+      return { action: 'RESUME_COMBAT', randomHome };
+    }
+    if (currentMap === homeMap && !randomHome && hasPlayerPosition
+      && Math.hypot(playerX - homeX, playerY - homeY) <= 3) {
+      return { action: 'AT_HOME', randomHome };
+    }
+    if (currentMap === homeMap && randomHome) return { action: 'TELEPORT_RELEASE', randomHome };
+    return { action: 'TELEPORT_CONFIRM', randomHome };
+  }
+
+  function createAutomationOrchestrator() {
+    const intentPriority = Object.freeze({ PLAYER_WHITELIST: 10, AB_BUFF_PENDING: 15, PLAYER_FLEE: 20, PLAYER_RETREAT: 30 });
+    const pendingIntents = new Map();
+    let lastDecision = {
+      owner: null,
+      phase: 'idle',
+      mode: 'IDLE',
+      blockedBy: null,
+      pendingIntent: null,
+      effects: [],
+    };
+
+    function activePendingIntent() {
+      return [...pendingIntents.values()].sort((a, b) => (intentPriority[b.type] || 0) - (intentPriority[a.type] || 0))[0] || null;
+    }
+
+    function submit(intent = {}) {
+      if (intent.type === 'FLOW_COMPLETED') {
+        if (intent.flow) pendingIntents.delete(intent.flow);
+        else pendingIntents.clear();
+        lastDecision = { ...lastDecision, pendingIntent: activePendingIntent()?.type || null };
+        return;
+      }
+      if (Object.hasOwn(intentPriority, intent.type)) {
+        pendingIntents.set(intent.type, { ...intent });
+        lastDecision = { ...lastDecision, pendingIntent: activePendingIntent()?.type || null };
+      }
+    }
+
+    function tick(snapshot = {}) {
+      const collector = snapshot.collector || {};
+      const pendingIntent = activePendingIntent();
+      let decision;
+      if (snapshot.enabled === false) {
+        decision = {
+          owner: 'PAUSED', phase: 'paused', mode: 'IDLE', blockedBy: null,
+          pendingIntent: pendingIntent?.type || null, effects: [],
+        };
+      } else if (snapshot.dead) {
+        decision = {
+          owner: 'DEAD_RESPAWN', phase: 'dead', mode: 'ACTIVE', blockedBy: null,
+          pendingIntent: pendingIntent?.type || null, effects: [],
+        };
+      } else if (snapshot.connected === false) {
+        decision = {
+          owner: 'DISCONNECTED', phase: 'socket', mode: 'IDLE', blockedBy: null,
+          pendingIntent: pendingIntent?.type || null, effects: [],
+        };
+      } else if (pendingIntent?.type === 'PLAYER_FLEE' || pendingIntent?.type === 'PLAYER_RETREAT') {
+        const safetyOwner = pendingIntent.type;
+        decision = collector.active
+          ? {
+              owner: safetyOwner, phase: 'preempt', mode: 'ACTIVE', blockedBy: 'COLLECTOR',
+              pendingIntent: safetyOwner, effects: [{ type: 'RELEASE_COLLECTOR', reason: safetyOwner }],
+            }
+          : {
+              owner: safetyOwner, phase: snapshot.playerEncounter?.phase || (safetyOwner === 'PLAYER_RETREAT' ? 'retreat' : 'flee'), mode: 'ACTIVE', blockedBy: null,
+              pendingIntent: safetyOwner, effects: [],
+            };
+      } else if (pendingIntent?.type === 'AB_BUFF_PENDING') {
+        decision = collector.active
+          ? {
+              owner: 'AB_BUFF', phase: 'preempt', mode: 'ACTIVE', blockedBy: 'COLLECTOR',
+              pendingIntent: 'AB_BUFF_PENDING', effects: [{ type: 'RELEASE_COLLECTOR', reason: 'AB_BUFF_PENDING' }],
+            }
+          : snapshot.loot?.atomic
+            ? {
+                owner: 'NORMAL_LOOT', phase: snapshot.loot.phase || 'active', mode: 'DRAINING', blockedBy: null,
+                pendingIntent: 'AB_BUFF_PENDING', effects: [],
+              }
+          : {
+              owner: 'AB_BUFF', phase: 'pending', mode: 'ACTIVE', blockedBy: null,
+              pendingIntent: 'AB_BUFF_PENDING', effects: [],
+            };
+      } else if (snapshot.storage?.urgent && collector.active) {
+        decision = {
+          owner: 'STORAGE', phase: 'preempt', mode: 'ACTIVE', blockedBy: 'COLLECTOR',
+          pendingIntent: pendingIntent?.type || null, effects: [{ type: 'RELEASE_COLLECTOR', reason: 'STORAGE_URGENT' }],
+        };
+      } else if (pendingIntent?.type === 'PLAYER_WHITELIST') {
+        decision = snapshot.loot?.atomic
+          ? {
+              owner: 'NORMAL_LOOT', phase: snapshot.loot.phase || 'active', mode: 'DRAINING', blockedBy: null,
+              pendingIntent: 'PLAYER_WHITELIST', effects: [{ type: 'HOLD_NEW_COLLECTOR_CLAIMS', reason: 'PLAYER_WHITELIST' }],
+            }
+          : collector.active && snapshot.combat?.active
+            ? {
+              owner: 'COMBAT', phase: snapshot.combat.phase || 'current-target', mode: 'DRAINING', blockedBy: null,
+              pendingIntent: 'PLAYER_WHITELIST', effects: [{ type: 'HOLD_NEW_COLLECTOR_CLAIMS', reason: 'PLAYER_WHITELIST' }],
+            }
+          : collector.active
+            ? {
+              owner: 'COLLECTOR', phase: collector.phase || 'active', mode: 'DRAINING', blockedBy: null,
+              pendingIntent: 'PLAYER_WHITELIST', effects: [{ type: 'HOLD_NEW_COLLECTOR_CLAIMS', reason: 'PLAYER_WHITELIST' }],
+            }
+          : {
+              owner: 'PLAYER_WHITELIST', phase: snapshot.playerEncounter?.phase || 'conversation', mode: 'ACTIVE', blockedBy: null,
+              pendingIntent: 'PLAYER_WHITELIST', effects: [],
+            };
+      } else if (snapshot.storage?.urgent) {
+        decision = snapshot.combat?.active
+          ? {
+              owner: 'STORAGE', phase: 'preempt-combat', mode: 'ACTIVE', blockedBy: 'COMBAT',
+              pendingIntent: pendingIntent?.type || null, effects: [{ type: 'ABANDON_COMBAT', reason: 'STORAGE_URGENT' }],
+            }
+          : {
+              owner: 'STORAGE', phase: snapshot.storage.phase || 'urgent', mode: 'ACTIVE', blockedBy: null,
+              pendingIntent: pendingIntent?.type || null, effects: [],
+            };
+      } else if (snapshot.storage?.active) {
+        decision = {
+          owner: 'STORAGE', phase: snapshot.storage.phase || 'active', mode: 'ACTIVE', blockedBy: null,
+          pendingIntent: pendingIntent?.type || null, effects: [],
+        };
+      } else if (snapshot.loot?.atomic) {
+        decision = {
+          owner: 'NORMAL_LOOT', phase: snapshot.loot.phase || 'active', mode: 'DRAINING', blockedBy: null,
+          pendingIntent: collector.active ? 'COLLECTOR' : null, effects: [],
+        };
+      } else if (collector.active) {
+        decision = snapshot.rest?.active
+          ? {
+              owner: 'COLLECTOR', phase: 'prepare-rest-exit', mode: 'ACTIVE', blockedBy: 'REST',
+              pendingIntent: null, effects: [{ type: 'EXIT_REST', reason: 'COLLECTOR' }],
+            }
+          : snapshot.combat?.active
+          ? {
+              owner: 'COMBAT', phase: snapshot.combat.phase || 'current-target', mode: 'DRAINING', blockedBy: null,
+              pendingIntent: 'COLLECTOR', effects: [],
+            }
+          : {
+              owner: 'COLLECTOR', phase: collector.phase || 'active', mode: 'ACTIVE', blockedBy: null,
+              pendingIntent: null, effects: [],
+            };
+      } else if (snapshot.combat?.active) {
+        decision = {
+          owner: 'COMBAT', phase: snapshot.combat.phase || 'active', mode: 'ACTIVE', blockedBy: null,
+          pendingIntent: pendingIntent?.type || null, effects: [],
+        };
+      } else if (snapshot.storage?.requested) {
+        decision = snapshot.rest?.active
+          ? {
+              owner: 'STORAGE', phase: 'prepare-rest-exit', mode: 'ACTIVE', blockedBy: 'REST',
+              pendingIntent: pendingIntent?.type || null, effects: [{ type: 'EXIT_REST', reason: 'STORAGE' }],
+            }
+          : {
+              owner: 'STORAGE', phase: snapshot.storage.phase || 'requested', mode: 'ACTIVE', blockedBy: null,
+              pendingIntent: pendingIntent?.type || null, effects: [],
+            };
+      } else if (snapshot.rest?.active) {
+        decision = {
+          owner: 'REST', phase: snapshot.rest.phase || 'active', mode: 'ACTIVE', blockedBy: null,
+          pendingIntent: pendingIntent?.type || null, effects: [],
+        };
+      } else if (snapshot.search?.active) {
+        decision = {
+          owner: 'SEARCH', phase: snapshot.search.phase || 'find-monster', mode: 'ACTIVE', blockedBy: null,
+          pendingIntent: pendingIntent?.type || null, effects: [],
+        };
+      } else {
+        decision = {
+          owner: null, phase: 'idle', mode: 'IDLE', blockedBy: null,
+          pendingIntent: null, effects: [],
+        };
+      }
+      lastDecision = decision;
+      return { ...decision, effects: decision.effects.map(effect => ({ ...effect })) };
+    }
+
+    function status() {
+      const pendingIntent = activePendingIntent();
+      return {
+        ...lastDecision,
+        pendingIntent: pendingIntent?.type || null,
+        effects: lastDecision.effects.map(effect => ({ ...effect })),
+      };
+    }
+
+    return { submit, tick, status };
+  }
+
   function createBotActivityReporter() {
     let current = null;
     let activitySince = 0;
@@ -154,6 +358,15 @@ const RO_PURE_CORE = (() => {
           : { code: 'DEAD', label: 'ตัวละครตาย', detail: 'Auto-Respawn ปิดอยู่', blocker: 'ทุกงานหยุดรอการเกิดใหม่', tone: 'danger', progressKey: 'dead' };
       } else if (!context.socketConnected) {
         next = { code: 'DISCONNECTED', label: 'ไม่ได้เชื่อมต่อเกม', detail: 'รอ Game WebSocket', blocker: 'ทุกงานรอการเชื่อมต่อ', tone: 'danger', progressKey: 'disconnected' };
+      } else if (context.orchestrator && (context.orchestrator.blockedBy || context.orchestrator.mode === 'DRAINING')) {
+        const orchestration = context.orchestrator;
+        next = {
+          code: 'ORCHESTRATOR', label: 'Orchestrator: ' + (orchestration.owner || 'IDLE'),
+          detail: ['Phase ' + (orchestration.phase || 'idle'), orchestration.pendingIntent ? 'Pending ' + orchestration.pendingIntent : ''].filter(Boolean).join(' · '),
+          blocker: orchestration.blockedBy ? 'Blocked by ' + orchestration.blockedBy : '',
+          tone: orchestration.blockedBy ? 'waiting' : 'active',
+          progressKey: [orchestration.owner, orchestration.phase, orchestration.mode, orchestration.blockedBy, orchestration.pendingIntent].join(':'),
+        };
       } else if (context.collector?.busy) {
         const collector = context.collector;
         const stageLabels = {
@@ -531,6 +744,8 @@ const RO_PURE_CORE = (() => {
   return {
     matchesPlayerWhitelist,
     shouldHoldPlayerFleeForEncounter,
+    decideLootQueueHomeReturn,
+    createAutomationOrchestrator,
     createBotActivityReporter,
     createPlayerEncounterTracker,
     createPlayerEncounterController,
@@ -547,7 +762,7 @@ if (typeof window !== 'undefined') {
   // ============================================================
   //  VERSION + config persistence (localStorage)
   // ============================================================
-  const VERSION = '1.3.3';
+  const VERSION = '2.0.0-rc.1';
   const GITHUB_RAW = 'https://raw.githubusercontent.com/purikuo129/ro-rebuild-script/main/ro-rebuild-pure.user.js';
   const CFG_STORAGE_KEY = 'roPureConfig_v1';
   // Master switch is intentionally not part of a Profile/export.  Moving a
@@ -1277,6 +1492,7 @@ if (typeof window !== 'undefined') {
   let lastPlayerPositionPacketAt = 0;  // packet ตำแหน่งล่าสุด (ใช้จับ action ของ Loot Queue)
   let teleportCoordinator = null;      // สร้างหลัง state วาร์ปพร้อม; setPlayerPosition แจ้งการยืนยันพิกัดสดได้
   let playerEncounter = null;          // สร้างหลัง combat/flow state พร้อม; clearWarpState ใช้ re-arm การตรวจผู้เล่น
+  const automationOrchestrator = RO_PURE_CORE.createAutomationOrchestrator();
   function setPlayerPosition(x, y) {
     lastPlayerPositionPacketAt = nowMs();
     if (player.x !== x || player.y !== y) lastPlayerPositionChangedAt = nowMs();
@@ -2041,6 +2257,7 @@ if (typeof window !== 'undefined') {
   const buffLoop = setInterval(() => {
     if (!masterBot.enabled()) return;
     if (isPlayerEncounterActive()) return;
+    if (lootQueue.isCollectorActive() || isWarpGuardActive()) return;
     if (!CFG.buffEnabled) return;
     if (isAbBuffActive()) return;
     if (!CFG.buffItems || !CFG.buffItems.length) return;
@@ -2518,11 +2735,28 @@ if (typeof window !== 'undefined') {
       if (message.type === 'available' && role() === 'collector') {
         for (const job of jobsFrom(message)) if (job && job.id) availableJobs.set(job.id, job);
         // AB Buff เริ่มรอ/ทำงานแล้ว: เก็บงานไว้ให้ server ถือ TTL แต่ไม่รับงานใหม่มาตัด flow AB
-        if (!activeJob && !claimPendingId && !isAbBuffPending() && !isAbBuffActive() && !shouldHoldLootQueueForStorage()) {
+        if (!activeJob && !claimPendingId && !isAbBuffPending() && !isAbBuffActive()
+          && !shouldHoldLootQueueForStorage() && !shouldDrainCollectorForWhitelist()
+          && !shouldDrainNormalLootForCollector()) {
           const next = nextOpenJob(null, nowMs());
           if (next) claim(next);
         }
       } else if (message.type === 'claimed' && role() === 'collector') {
+        // AB Buff เป็น priority สูงกว่า Collector: response claimed ที่มาช้าหลัง AB
+        // เริ่มแล้วต้องคืน Queue ทันที มิฉะนั้นจะยึด PENDING_IDLE กลับมาอีกครั้ง.
+        const orchestrationIntent = automationOrchestrator.status().pendingIntent;
+        const collectorPreempted = orchestrationIntent === 'PLAYER_FLEE' || orchestrationIntent === 'PLAYER_RETREAT';
+        if (isAbBuffPending() || isAbBuffActive() || collectorPreempted) {
+          if (claimPendingId === message.job.id) {
+            claimPendingId = null;
+            claimPendingAt = 0;
+          }
+          availableJobs.delete(message.job.id);
+          const reason = collectorPreempted ? orchestrationIntent : 'AB Buff priority';
+          send({ type: 'nack', id: message.job.id, claimToken: message.claimToken, reason });
+          log(collectorPreempted ? '🏃 Player safety priority → คืน claimed งาน' : '⛪ AB Buff priority → คืน claimed งาน', message.job.itemName, 'ให้ Loot Queue');
+          return;
+        }
         const replacingSettledJob = activeJob && activeJob.settleUntil && claimPendingId === message.job.id;
         if (activeJob && !replacingSettledJob) {
           if (activeJob.job.id !== message.job.id) log('⚠️ Loot Queue: ข้าม claimed ซ้ำระหว่างทำงาน', message.job.itemName);
@@ -2573,28 +2807,50 @@ if (typeof window !== 'undefined') {
         error(error) { log('⚠️ Loot Queue transport:', error.message); },
       });
     };
+    const lootQueueHomeReturnDecision = () => RO_PURE_CORE.decideLootQueueHomeReturn({
+      combatEnabled: CFG.combatEnabled,
+      farmMap: CFG.farmMap,
+      currentMap,
+      homeMap: CFG.lootQueueHomeMap,
+      homeX: CFG.lootQueueHomeX,
+      homeY: CFG.lootQueueHomeY,
+      playerX: player.x,
+      playerY: player.y,
+    });
     const returnHome = () => {
-      if (!CFG.lootQueueHomeMap) { activeJob = null; idleReturnAt = nowMs(); return; }
-      if (currentMap === CFG.lootQueueHomeMap && player.x != null && Math.hypot(player.x - CFG.lootQueueHomeX, player.y - CFG.lootQueueHomeY) <= 3) {
+      const decision = lootQueueHomeReturnDecision();
+      if (decision.action === 'RELEASE' || decision.action === 'AT_HOME') {
         activeJob = null; idleReturnAt = nowMs(); return;
+      }
+      if (decision.action === 'RESUME_COMBAT') {
+        activeJob = null;
+        idleReturnAt = nowMs();
+        log('📮 Loot Queue: อยู่แมปฟาร์มแล้ว → จบงาน Collector และกลับเข้า Combat');
+        return;
       }
       if (homeReturn) { activeJob = null; return; }
       if (sendTeleport(CFG.lootQueueHomeMap, CFG.lootQueueHomeX, CFG.lootQueueHomeY, 'loot-queue-home')) {
+        if (decision.action === 'TELEPORT_RELEASE') {
+          activeJob = null;
+          idleReturnAt = nowMs();
+          log('📮 Loot Queue: วาร์ปสุ่มกลับจุดรอในแมปเดิม → ส่งแล้วจบงาน Collector');
+          return;
+        }
         homeReturn = { requestedAt: nowMs(), attempts: 1, retryAt: 0, fromMap: currentMap };
         activeJob = null;
         idleReturnAt = 0;
         log('📮 Loot Queue: กลับจุดรอ', CFG.lootQueueHomeMap, '(รอยืนยัน 1/' + MAX_WARP_ATTEMPTS + ')');
       }
     };
-    // sendTeleport() สำเร็จเพียงแปลว่าส่ง packet ออกได้ ไม่ได้ยืนยันว่า server วาร์ปให้จริง
-    // จึงเก็บ state รอ MAP_NAME และ retry แบบจำกัดครั้ง เพื่อไม่ให้ collector ค้างแมปฟาร์ม
+    // cross-map และ same-map exact ต้องรอยืนยัน; same-map random ถูก Teleport Coordinator
+    // กำหนดเป็น fire-and-release อยู่แล้ว จึงไม่สร้าง confirmation state ซ้ำอีกชั้น.
     const tickHomeReturn = (now) => {
       if (!homeReturn) return false;
       const homeMap = CFG.lootQueueHomeMap;
       if (!homeMap) { homeReturn = null; idleReturnAt = now; return true; }
       const atHomePosition = currentMap === homeMap && player.x != null && player.y != null
         && Math.hypot(player.x - CFG.lootQueueHomeX, player.y - CFG.lootQueueHomeY) <= 3;
-      // วาร์ปข้ามแมปใช้ MAP_NAME ยืนยันได้; วาร์ปในแมปต้องเห็นพิกัดถึงจุดรอจริง
+      // วาร์ปข้ามแมปใช้ MAP_NAME ยืนยันได้; same-map exact ต้องเห็นพิกัดถึงจุดรอจริง.
       if (currentMap === homeMap && (homeReturn.fromMap !== homeMap || atHomePosition)) {
         log('📮 Loot Queue: ถึงจุดรอแล้ว', homeMap);
         homeReturn = null;
@@ -2664,6 +2920,48 @@ if (typeof window !== 'undefined') {
       }
       send({ type: 'nack', id: stale.job.id, claimToken: stale.claimToken });
       log('🏦 Loot Queue: กระเป๋าเต็ม → ปล่อยงานกลับคิวก่อนฝาก', stale.job.itemName);
+      return true;
+    };
+    // AB Buff ต้องไม่รอ Collector ที่ claim งานใหม่ต่อเนื่อง: คืนเฉพาะงานที่ยังไม่
+    // complete แล้วล้าง state claim/return-home เดิม เพื่อให้ AB ออกจาก PENDING_IDLE.
+    const releaseActiveForAbBuff = () => {
+      const stale = activeJob;
+      const hadCollectorState = !!stale || !!claimPendingId || !!homeReturn;
+      if (!hadCollectorState) return false;
+      activeJob = null;
+      claimPendingId = null;
+      claimPendingAt = 0;
+      homeReturn = null;
+      idleReturnAt = 0;
+      if (stale && !stale.settleUntil) {
+        send({ type: 'nack', id: stale.job.id, claimToken: stale.claimToken, reason: 'AB Buff priority' });
+        log('⛪ AB Buff priority → คืนงาน Collector', stale.job.itemName, 'ให้ Loot Queue');
+      } else if (stale) {
+        log('⛪ AB Buff priority → งาน Collector จบแล้ว ปล่อยให้ AB ทำงานต่อ');
+      } else {
+        log('⛪ AB Buff priority → ยกเลิกการ claim/กลับจุดรอของ Collector');
+      }
+      return true;
+    };
+    const releaseActiveForOrchestrator = (reason) => {
+      if (reason === 'AB_BUFF_PENDING') return releaseActiveForAbBuff();
+      if (reason === 'STORAGE_URGENT') return releaseActiveForStorage();
+      const stale = activeJob;
+      const hadCollectorState = !!stale || !!claimPendingId || !!homeReturn;
+      if (!hadCollectorState) return false;
+      activeJob = null;
+      claimPendingId = null;
+      claimPendingAt = 0;
+      homeReturn = null;
+      idleReturnAt = 0;
+      if (stale && !stale.settleUntil) {
+        send({ type: 'nack', id: stale.job.id, claimToken: stale.claimToken, reason });
+        log('🏃 Player safety priority → คืนงาน Collector', stale.job.itemName, 'ให้ Loot Queue');
+      } else if (stale) {
+        log('🏃 Player safety priority → งาน Collector จบแล้ว ล้างสถานะก่อนหนี');
+      } else {
+        log('🏃 Player safety priority → ยกเลิกการ claim/กลับจุดรอของ Collector');
+      }
       return true;
     };
     const setActiveJobTimer = (key, dueAt, setAt = nowMs()) => {
@@ -2805,15 +3103,46 @@ if (typeof window !== 'undefined') {
       resume() { connect(); },
       tick() {
         if (!masterBot.enabled()) return;
-        if (isPlayerEncounterActive()) return;
+        if (isPlayerEncounterActive() && !shouldDrainCollectorForWhitelist()) return;
         connect(); offerPending();
         if (role() !== 'collector') return;
+        // AB Buff แซง Collector: เมื่อบัพขาด ให้คืน claim ที่ยังไม่สำเร็จทันที
+        // แล้ว abBuffLoop จะออกจาก PENDING_IDLE ในรอบถัดไป.
+        if (isAbBuffPending() || isAbBuffActive()) {
+          releaseActiveForAbBuff();
+          return;
+        }
         // hard-full = เก็บต่อไม่ได้แล้ว จึงคืนงานให้ queue ก่อนให้ Storage เป็นเจ้าของการวาร์ป
         const storageTrigger = getStorageDepositTrigger();
         if (storageTrigger && storageTrigger.urgent && activeJob) {
           releaseActiveForStorage();
           return;
         }
+        // Claim/lease เริ่มตั้งแต่ server ตอบ claimed จึงต้อง renew lease ต่อระหว่างที่
+        // Combat target และ normal Loot เดิมกำลัง drain; absolute drop TTL ยังเดินตาม server.
+        if (activeJob) {
+          const drainingJob = activeJob.job;
+          const drainingNow = nowMs();
+          if (drainingNow > drainingJob.expiresAt) {
+            log('⌛ Loot Queue: งานหมดอายุก่อนเก็บ', drainingJob.itemName);
+            markDeferredVisibilityPass(drainingJob);
+            send({ type: 'nack', id: drainingJob.id, claimToken: activeJob.claimToken });
+            activeJob = null;
+            idleReturnAt = drainingNow + warpCooldownMs();
+            return;
+          }
+          if (isDead) { stage('dead', 'ตายอยู่ — พักงานจนกว่าจะ respawn'); return; }
+          if (!activeJob.settleUntil && !claimPendingId && (!activeJob.renewAt || drainingNow - activeJob.renewAt > 8000)) {
+            if (send({ type: 'renew', id: drainingJob.id, claimToken: activeJob.claimToken })) activeJob.renewAt = drainingNow;
+          }
+        }
+        if (shouldDrainNormalLootForCollector()) return;
+        if (isResting || postRespawnRest) {
+          exitRestForCollector();
+          return;
+        }
+        const collectorDecision = applyAutomationDecision(automationOrchestrator.tick(automationSnapshot()));
+        if (collectorDecision.owner !== 'COLLECTOR') return;
         if (!activeJob) {
           // เมื่อ AB Buff เข้าคิวหรือเริ่มเดินทางแล้ว collector ห้าม claim งานใหม่
           // งานที่ claim ก่อนหน้านั้นจะถูกปล่อยให้จบก่อน AB เริ่มเองจาก PENDING_IDLE
@@ -2823,6 +3152,12 @@ if (typeof window !== 'undefined') {
             return;
           }
           if (homeReturn) {
+            if (shouldDrainCollectorForWhitelist()) {
+              homeReturn = null;
+              idleReturnAt = 0;
+              log('📮 Loot Queue: งานที่ claim จบแล้ว → ยกเลิกกลับจุดรอเพื่อให้ Whitelist ทำต่อ');
+              return;
+            }
             const nextWhileReturning = nextOpenJob(null, nowMs());
             if (nextWhileReturning) {
               homeReturn = null;
@@ -2839,6 +3174,7 @@ if (typeof window !== 'undefined') {
             claimPendingId = null; claimPendingAt = 0;
             return;
           }
+          if (shouldDrainCollectorForWhitelist() || shouldDrainNormalLootForCollector()) return;
           const next = nextOpenJob(null, nowMs());
           if (next && claim(next)) return;
           if (!idleReturnAt || nowMs() < idleReturnAt) return;
@@ -2850,13 +3186,6 @@ if (typeof window !== 'undefined') {
           return;
         }
         const job = activeJob.job, now = nowMs();
-        if (now > job.expiresAt) { log('⌛ Loot Queue: งานหมดอายุก่อนเก็บ', job.itemName); markDeferredVisibilityPass(job); send({ type: 'nack', id: job.id, claimToken: activeJob.claimToken }); activeJob = null; idleReturnAt = now + warpCooldownMs(); return; }
-        if (isDead) { stage('dead', 'ตายอยู่ — พักงานจนกว่าจะ respawn'); return; }
-        // pickup() ACKs and deletes this job at the local queue. Never renew
-        // it while settling or while its successor claim is in flight.
-        if (!activeJob.settleUntil && !claimPendingId && (!activeJob.renewAt || now - activeJob.renewAt > 8000)) {
-          if (send({ type: 'renew', id: job.id, claimToken: activeJob.claimToken })) activeJob.renewAt = now;
-        }
         if (pauseActiveJobTimersForSkill(now)) return;
         // รับงานแรกแล้วพักสั้น ๆ เพื่อรวม drop ที่ฟาร์มเพิ่งฆ่าต่อเนื่อง ก่อนวาร์ปออกจากเมือง
         if (now < activeJob.claimDelayUntil) {
@@ -2868,8 +3197,9 @@ if (typeof window !== 'undefined') {
           // AB Buff ที่อยู่ PENDING_IDLE ต้องได้เริ่มหลังงานปัจจุบันจบจริง
           // จึงห้าม Queue chain งานต่อเนื่อง เช่นเดียวกับกรณีต้องไปฝากของ
           const holdForAbBuff = isAbBuffPending();
+          const holdForWhitelist = shouldDrainCollectorForWhitelist();
           if (claimPendingId) return;
-          const next = (holdForAbBuff || shouldHoldLootQueueForStorage()) ? null : nextOpenJob(job, now);
+          const next = (holdForAbBuff || holdForWhitelist || shouldHoldLootQueueForStorage()) ? null : nextOpenJob(job, now);
           if (next && claim(next)) {
             activeJob.stage = next.map === job.map ? 'claim-same-map' : 'claim-next-map';
             log('📮 Loot Queue: พบงานคิวถัดไป' + (next.map === job.map ? ' ในแมปเดียวกัน' : ' คนละแมป') + ' → เก็บต่อ', next.itemName);
@@ -2878,6 +3208,12 @@ if (typeof window !== 'undefined') {
           // Cloudflare อาจตอบ claimed หลัง tick ถัดไป: ห้าม return-home จนกว่าจะตอบหรือ timeout.
           if (claimPendingId) return;
           if (holdForAbBuff) log('📮 Loot Queue: งานปัจจุบันจบแล้ว → ไม่ต่อคิว เพราะ AB Buff รออยู่');
+          else if (holdForWhitelist) log('📮 Loot Queue: งานปัจจุบันจบแล้ว → ไม่ต่อคิว เพราะ Whitelist รอสนทนา');
+          // Hybrid อยู่แมปฟาร์มแล้วและไม่มีการวาร์ปกลับจริง จึงไม่ใช้ warp delay มาหน่วง Combat.
+          if (lootQueueHomeReturnDecision().action === 'RESUME_COMBAT') {
+            returnHome();
+            return;
+          }
           // ไม่มีงานต่อแล้วจึงใช้ delay วาร์ปของ Loot Queue เดิมก่อนกลับจุดรอ.
           // หาก job ใหม่เข้ามาระหว่างรอ nextOpenJob() ด้านบนจะ claim ก่อนเสมอ.
           if (!activeJob.returnHomeNotBefore) setActiveJobTimer('returnHomeNotBefore', now + warpCooldownMs(), now);
@@ -3021,6 +3357,7 @@ if (typeof window !== 'undefined') {
           return;
         }
       },
+      releaseForOrchestrator(reason) { return releaseActiveForOrchestrator(reason); },
       status() {
         const canSkip = !!activeJob && !activeJob.settleUntil;
         const transport = lootQueueTransport.status();
@@ -3038,6 +3375,72 @@ if (typeof window !== 'undefined') {
       reconnect() { lootQueueTransport.reconnect(); connect(); },
     };
   })();
+
+  function shouldDrainCollectorForWhitelist() {
+    return playerEncounter?.status().state === 'WHITELIST_WORK';
+  }
+
+  function automationSnapshot() {
+    const snapshotNow = nowMs();
+    const collectorStatus = lootQueue.status();
+    const storageTrigger = getStorageDepositTrigger();
+    const encounterStatus = playerEncounter.status(snapshotNow);
+    return {
+      enabled: masterBot.enabled(), connected: !!activeWS && activeWS.readyState === 1,
+      dead: isDead,
+      playerEncounter: { active: encounterStatus.state !== 'IDLE', phase: encounterStatus.state },
+      collector: {
+        active: lootQueue.isCollectorActive(),
+        phase: collectorStatus.activeStage || (collectorStatus.returningHome ? 'return-home' : 'active'),
+        jobId: collectorStatus.activeJob?.id || collectorStatus.claimPendingId || null,
+      },
+      combat: { active: !!target, phase: target ? 'target-active' : 'idle', targetId: target?.id || null },
+      loot: {
+        atomic: shouldDrainNormalLootForCollector(),
+        phase: pickupPending ? 'pickup-wait' : (queue.size ? 'pickup' : (lootSettleUntil > snapshotNow ? 'settle' : 'idle')),
+      },
+      rest: { active: isResting || postRespawnRest, phase: postRespawnRest ? 'post-respawn' : 'recover', postRespawn: postRespawnRest },
+      abBuff: { pending: isAbBuffPending(), active: isAbBuffActive(), phase: abBuffState },
+      storage: { requested: !!storageTrigger, urgent: !!storageTrigger?.urgent, active: storageState !== 'IDLE', phase: storageState },
+      search: {
+        active: CFG.combatEnabled && !target,
+        phase: CFG.farmMap && currentMap && currentMap !== CFG.farmMap
+          ? 'return-farm'
+          : (snapshotNow < combatCooldownUntil ? 'post-combat-delay'
+            : (lastWarpPlayerPos && warpGuardUntil > snapshotNow ? 'post-warp-guard' : 'find-monster')),
+      },
+    };
+  }
+
+  function exitRestForOrchestrator(reason = 'Collector') {
+    if (isResting && !sendStand()) return false;
+    isResting = false;
+    restUntil = 0;
+    postRespawnRest = false;
+    log('🧭 Orchestrator: ลุกจาก Rest ก่อนเริ่มงาน ' + reason);
+    return true;
+  }
+  function exitRestForCollector() { return exitRestForOrchestrator('Collector'); }
+
+  function applyAutomationDecision(decision) {
+    for (const effect of decision.effects || []) {
+      if (effect.type === 'RELEASE_COLLECTOR') lootQueue.releaseForOrchestrator(effect.reason);
+      else if (effect.type === 'ABANDON_COMBAT' && target) abandonTarget(effect.reason || 'Orchestrator priority', false);
+      else if (effect.type === 'EXIT_REST') exitRestForOrchestrator(effect.reason);
+    }
+    return automationOrchestrator.tick(automationSnapshot());
+  }
+
+  function submitAutomationIntent(intent) {
+    automationOrchestrator.submit(intent);
+    return applyAutomationDecision(automationOrchestrator.tick(automationSnapshot()));
+  }
+
+  function completeAutomationFlow(flow) {
+    automationOrchestrator.submit({ type: 'FLOW_COMPLETED', flow });
+    return automationOrchestrator.tick(automationSnapshot());
+  }
+
   setInterval(() => {
     try { lootQueue.tick(); }
     catch (error) { log('⚠️ Loot Queue tick error:', error && error.message ? error.message : String(error)); }
@@ -3181,6 +3584,9 @@ if (typeof window !== 'undefined') {
   // จึงรอเฉพาะ drop ปกติ, ผล pickup และ quiet window หลังฆ่า แล้วค่อยกลับไปนั่งพัก.
   function shouldDeferRestForNormalLoot(now = nowMs()) {
     return CFG.lootEnabled && (now < lootSettleUntil || queue.size > 0 || pickupPending != null);
+  }
+  function shouldDrainNormalLootForCollector(now = nowMs()) {
+    return shouldDeferRestForNormalLoot(now);
   }
 
   // PENDING_IDLE ยังอยู่แมปฟาร์มและปล่อยงานเดิมให้จบ จึงยังไม่ hold Flee Player
@@ -5066,7 +5472,7 @@ if (typeof window !== 'undefined') {
     if (!masterBot.enabled()) return;
     if (isPlayerEncounterBlockingAutomation()) return;
     if (!CFG.lootEnabled) return;
-    if (lootQueue.isCollectorBusy()) return;
+    if (lootQueue.isCollectorBusy() && !shouldDrainNormalLootForCollector()) return;
     if (isAbBuffActive()) return;
     // ระหว่างสนทนา AI ต้องตอบก่อน: หลังตอบอนุญาตเก็บเฉพาะ drop ที่อยู่ใกล้เท้า
     if (isAiReplyInteractionActive() && (!aiInteraction || aiInteraction.phase !== 'LOOT')) return;
@@ -5133,6 +5539,7 @@ if (typeof window !== 'undefined') {
     if (!masterBot.enabled()) return;
     if (isPlayerEncounterActive()) return;
     if (!CFG.warpLootEnabled) return;
+    if (lootQueue.isCollectorActive()) return;
     if (isAbBuffActive()) return;
     if (isAiReplyInteractionActive()) return;
     if (!currentMap) return;                          // ไม่รู้แมป → ไม่วาร์ป (กัน packet ผิด)
@@ -5474,7 +5881,7 @@ if (typeof window !== 'undefined') {
   }
   function storageLoopTick() {
     if (!masterBot.enabled()) return;
-    if (isPlayerEncounterActive()) return;
+    if (isPlayerEncounterActive() && !(shouldDrainCollectorForWhitelist() && storageState !== 'IDLE')) return;
     if (!CFG.storageEnabled) return;
     if (isAbBuffActive()) return;
     if (isOreRefineActive()) return;
@@ -5488,6 +5895,10 @@ if (typeof window !== 'undefined') {
     if (storageState === 'IDLE') {
       if (now < storageRetryAt) return;
       const trigger = getStorageDepositTrigger();
+      if (trigger) {
+        const storageDecision = applyAutomationDecision(automationOrchestrator.tick(automationSnapshot()));
+        if (storageDecision.owner !== 'STORAGE') return;
+      }
       if (trigger && lootQueue.isCollectorActive()) {
         // Soft threshold: collector จะหยุดรับงานใหม่จาก shouldHoldLootQueueForStorage()
         // Hard full: tick ของ collector จะ nack งานภายใน 150ms แล้วกลับมาที่นี่เพื่อเริ่มฝาก
@@ -6127,6 +6538,10 @@ if (typeof window !== 'undefined') {
     };
   }
   function playerEncounterWarpTown(result) {
+    if (result) {
+      const decision = submitAutomationIntent({ type: 'PLAYER_RETREAT', playerName: result.name || '' });
+      if (decision.blockedBy === 'COLLECTOR') return false;
+    }
     resetFleePlayerDelay();
     clearAiInteraction(result ? 'ผู้เล่นคนเดิมตามซ้ำ' : 'จบ whitelist flow');
     const point = storageKafraPoint();
@@ -6138,7 +6553,8 @@ if (typeof window !== 'undefined') {
       log('🚨 ผู้เล่นคนเดิม ' + (result.name || '?') + ' โผล่ใกล้ครั้งที่ ' + result.count + ' → กลับเมืองพัก');
       logImportant('flee', '🚨 ' + (result.name || 'ผู้เล่นไม่ทราบชื่อ') + ' ตามใกล้ครบ ' + result.count + ' ครั้ง → กลับเมืองพัก');
     }
-    return sendTeleport(CFG.kafraMap, point.warpX, point.warpY, result ? 'player-repeat-town-rest' : 'player-whitelist-town-rest');
+    const sent = sendTeleport(CFG.kafraMap, point.warpX, point.warpY, result ? 'player-repeat-town-rest' : 'player-whitelist-town-rest');
+    return sent;
   }
   function playerEncounterWarpFarm() {
     if (!CFG.farmMap) { log('⚠️ Player Encounter: ยังไม่ได้ตั้ง farmMap สำหรับกลับไปฟาร์ม'); return false; }
@@ -6150,6 +6566,7 @@ if (typeof window !== 'undefined') {
       flee(result) {
         if (result && result.count) log('👤 ' + result.name + ' โผล่ใกล้รอบ ' + result.count + '/3 ในช่วงนับ');
         clearAiInteraction('พบผู้เล่นนอก whitelist');
+        submitAutomationIntent({ type: 'PLAYER_FLEE', playerName: result?.name || '' });
         return fleePlayersIfNeeded(result && result.name ? ' (' + result.name + ' รอบ ' + result.count + '/3)' : '');
       },
       warpTown: playerEncounterWarpTown,
@@ -6179,11 +6596,14 @@ if (typeof window !== 'undefined') {
     const result = playerEncounter.tick({
       now,
       currentMap,
-      workPending: !!target || shouldDeferRestForNormalLoot(now),
+      workPending: !!target || shouldDeferRestForNormalLoot(now) || lootQueue.isCollectorActive() || isAbBuffPending() || isAbBuffActive() || storageState !== 'IDLE',
       conversationActive: isAiReplyInteractionActive(),
       teleportActive: !!teleportCoordinator?.status().active,
     });
     const after = playerEncounter.status(now);
+    if (before.state !== 'IDLE' && after.state === 'IDLE') {
+      completeAutomationFlow(before.mode === 'repeat' ? 'PLAYER_RETREAT' : 'PLAYER_WHITELIST');
+    }
     if (before.state !== after.state) {
       log('👤 Player Encounter:', before.state, '→', after.state,
         after.playerName ? '(' + after.playerName + ')' : '');
@@ -7308,9 +7728,11 @@ if (typeof window !== 'undefined') {
 
   // ---------- AB BUFF controller ----------
   function setAbBuffState(next, reason = '') {
-    if (abBuffState !== next) dbg('⛪ AB Buff:', abBuffState, '→', next, reason ? '(' + reason + ')' : '');
-    if (abBuffState !== next) abBuffWaitBlockerTag = '';
+    const changed = abBuffState !== next;
+    if (changed) dbg('⛪ AB Buff:', abBuffState, '→', next, reason ? '(' + reason + ')' : '');
+    if (changed) abBuffWaitBlockerTag = '';
     abBuffState = next;
+    if (changed && next === 'PENDING_IDLE') submitAutomationIntent({ type: 'AB_BUFF_PENDING' });
   }
   function stopAbBuff(reason) {
     if (abBuffState !== 'IDLE') log('⛪ AB Buff หยุด:', reason);
@@ -7320,6 +7742,7 @@ if (typeof window !== 'undefined') {
     abBuffAttemptStartedAt = 0;
     abBuffDisableAfterReturn = false;
     abBuffWaitBlockerTag = '';
+    completeAutomationFlow('AB_BUFF_PENDING');
   }
 function abBuffTimeoutMs() {
   // ค่า config เป็น "วินาที" จึง clamp ขั้นต่ำที่ 30 วินาทีก่อนแปลงเป็น ms
@@ -7432,7 +7855,7 @@ function abBuffTimeoutMs() {
   }
   const abBuffLoop = setInterval(() => {
     if (!masterBot.enabled()) return;
-    if (isPlayerEncounterActive()) return;
+    if (isPlayerEncounterActive() && !(shouldDrainCollectorForWhitelist() && abBuffState !== 'IDLE')) return;
     const timerNow = abBuffTimerNow();      // timer ภายใน AB ต้องเป็น clock เดียวกันทั้งหมด
     for (const [statusId, effect] of abBuffEffects) {
       if (effect.expiresAt <= timerNow) abBuffEffects.delete(statusId);
@@ -7733,6 +8156,7 @@ function abBuffTimeoutMs() {
   function resetFleePlayerDelay() {
     fleePlayerDetectedAt = 0;
     fleePlayerDeferredForLoot = false;
+    completeAutomationFlow('PLAYER_FLEE');
   }
 
   // Player Flee มีทางตัดสินใจเดียว: packet event, post-warp scan และ combat loop เรียกที่นี่ร่วมกัน
@@ -7770,6 +8194,7 @@ function abBuffTimeoutMs() {
     const delayMs = Math.round(delaySec * 1000);
     if (!fleePlayerDetectedAt) {
       fleePlayerDetectedAt = now;
+      submitAutomationIntent({ type: 'PLAYER_FLEE' });
       dbg('👤 Flee Player พบผู้เล่น:', playerCount + ' คน', 'radius=' + radius, 'delay=' + delaySec.toFixed(1) + 's');
       if (delayMs > 0) log('👤 เจอผู้เล่นอื่น ' + playerCount + ' คน → รอ ' + delaySec.toFixed(1) + 's ก่อนวาร์ป');
     }
@@ -7810,6 +8235,7 @@ function abBuffTimeoutMs() {
     });
     if (ignored || encounter.action === 'ignore') return;
     if (encounter.action === 'whitelist') {
+      submitAutomationIntent({ type: 'PLAYER_WHITELIST', playerName: encounter.name || '' });
       log('💬 Player Whitelist:', encounter.name || e.id.toString(16), 'โผล่ใกล้ ' + distance.toFixed(1) + ' ช่อง → จบงานและรอสนทนา');
       return;
     }
@@ -8085,10 +8511,6 @@ function abBuffTimeoutMs() {
     // Manual Skill ให้ทำงานตามคิวเดิมก่อน ส่วน Auto Support แซงได้เฉพาะ
     // ระหว่าง Collector มีงาน เพื่อไม่เปลี่ยนลำดับความปลอดภัย Flee ใน flow ปกติ.
     if (manualSkillQueue.length && !manualSkillQueueTimer && !autoSupportQueue.length) drainManualSkillQueue();
-    if (lootQueue.isCollectorBusy()) {
-      if (tryIdleSupportSkill(now)) return;
-      return;
-    }
     // Player Encounter เป็นเจ้าของลำดับ จบงาน → นั่ง/คุย → เมือง → พัก → กลับฟาร์ม.
     // WHITELIST_WORK คืน owned=false เฉพาะตอนต้องปล่อย combat/loot/AI เดิมให้จบ.
     if (tickPlayerEncounter(now).owned) return;
@@ -8099,6 +8521,11 @@ function abBuffTimeoutMs() {
     // AB Buff / Storage hold อยู่ภายใน fleePlayersIfNeeded แล้ว
     if (!isDead && activeWS && activeWS.readyState === 1
       && fleePlayersIfNeeded('', { immediate: now < postWarpTargetSettleUntil })) return;
+    const automationDecision = applyAutomationDecision(automationOrchestrator.tick(automationSnapshot()));
+    if (lootQueue.isCollectorActive() && automationDecision.owner !== 'COMBAT') {
+      if (tryIdleSupportSkill(now)) return;
+      return;
+    }
     // Self/ally และ Support ผู้เล่นอื่นใช้ queue เดียว และเป็นอิสระจาก
     // target acquisition. Outside Collector, preserve Flee's safety priority.
     if (tryIdleSupportSkill(now)) return;
@@ -8652,6 +9079,9 @@ function abBuffTimeoutMs() {
     if (isAiReplyInteractionActive()
       && !(aiInteraction.phase === 'FINISH_COMBAT' && target)
       && processAiReplyInteraction(now)) return;
+    // Loot Queue ที่ claim แล้วรอเฉพาะ target เดิมและ normal Loot ของ target นี้
+    // จบเท่านั้น; ถ้า target ถูกล้างระหว่าง tick ห้าม acquire ตัวใหม่.
+    if (lootQueue.isCollectorActive() && !target) return;
     if (!target) {
       const t = acquireTarget(now);
       if (t) { target = t; noMonsterSince = 0; return; }
@@ -9480,6 +9910,7 @@ function abBuffTimeoutMs() {
       now,
       masterEnabled: masterBot.enabled(), socketConnected: !!activeWS && activeWS.readyState === 1,
       dead: isDead, autoRespawnEnabled: CFG.autoRespawnEnabled, respawnRemainingMs,
+      orchestrator: automationOrchestrator.tick(automationSnapshot()),
       collector: collectorStatus.activeJob || collectorStatus.returningHome ? {
         busy: true, stage: collectorStatus.activeStage, itemName: collectorJob?.itemName || (collectorStatus.returningHome ? 'กลับจุดรอ' : ''),
         attempts: collectorStatus.activePickupAttempts || collectorStatus.homeReturnAttempts,
@@ -9827,6 +10258,7 @@ function abBuffTimeoutMs() {
 
     // ---------- สถานะ ----------
     botActivityStatus() { return botActivityStatus(); },
+    orchestratorStatus() { return automationOrchestrator.status(); },
     status() {
       const pct = hpPct();
       console.table([{
@@ -9855,6 +10287,7 @@ function abBuffTimeoutMs() {
         heal: { enabled: CFG.healEnabled, mode: CFG.healMode, threshold: CFG.healAtPercent + '%', items: healStatus },
         loot: { ...CFG.filter, queue: [...queue.values()].map(it => ({ item: nameOf(it.itemId), ...it })) },
         activity: botActivityStatus(),
+        orchestrator: automationOrchestrator.status(),
         fpsCap: fpsCap.status(),
       };
     },
@@ -9917,6 +10350,7 @@ function abBuffTimeoutMs() {
       console.log('  ASSIST.templateReplyOn() / ASSIST.setReplyTemplates(["สวัสดีครับ"])');
       console.log('  ASSIST.aiReplyStatus()             // ดูการตั้งค่า/การตอบในรอบ 1 นาที');
       console.log('  ASSIST.botActivityStatus()        // ดูงานปัจจุบัน/ตัวบล็อก/เวลาคืบหน้าล่าสุด');
+      console.log('  ASSIST.orchestratorStatus()       // ดู owner/phase/blocked-by/pending intent');
       console.log('  ASSIST.status()  ASSIST.config()  ASSIST.stopAll()');
     },
 
@@ -12019,6 +12453,9 @@ function abBuffTimeoutMs() {
           <div class="row"><span class="k">กำลังทำอะไร</span><span class="v" data-activity-main>?</span></div>
           <div class="row"><span class="k">รายละเอียด</span><span class="v" data-activity-detail>?</span></div>
           <div class="row"><span class="k">เหตุผลที่รอ</span><span class="v" data-activity-blocker>—</span></div>
+          <div class="row"><span class="k">Orchestrator owner</span><span class="v" data-orchestrator-owner>—</span></div>
+          <div class="row"><span class="k">Phase / mode</span><span class="v" data-orchestrator-phase>—</span></div>
+          <div class="row"><span class="k">Blocked by / pending</span><span class="v" data-orchestrator-blocked>—</span></div>
           <div class="row"><span class="k">อยู่สถานะนี้</span><span class="v" data-activity-since>0s</span></div>
           <div class="row"><span class="k">คืบหน้าล่าสุด</span><span class="v" data-activity-progress>0s</span></div>
           <div class="row"><span class="k">Game Packet ล่าสุด</span><span class="v" data-activity-packet>0s</span></div>
@@ -13638,6 +14075,10 @@ setInterval(()=>{if(last&&Date.now()-last.t>5000){document.getElementById('dot')
     set('[data-activity-main]', activity.label);
     set('[data-activity-detail]', activity.detail || '—');
     set('[data-activity-blocker]', activity.blocker || '—');
+    const orchestration = automationOrchestrator.status();
+    set('[data-orchestrator-owner]', orchestration.owner || 'IDLE');
+    set('[data-orchestrator-phase]', (orchestration.phase || 'idle') + ' / ' + (orchestration.mode || 'IDLE'));
+    set('[data-orchestrator-blocked]', [orchestration.blockedBy ? 'blocked: ' + orchestration.blockedBy : '', orchestration.pendingIntent ? 'pending: ' + orchestration.pendingIntent : ''].filter(Boolean).join(' · ') || '—');
     set('[data-activity-since]', fmtMs(activity.sinceMs));
     set('[data-activity-progress]', fmtMs(activity.progressAgoMs) + ' ที่แล้ว');
     set('[data-activity-packet]', activity.lastGamePacketAgoMs == null ? 'ยังไม่มี' : fmtMs(activity.lastGamePacketAgoMs) + ' ที่แล้ว');

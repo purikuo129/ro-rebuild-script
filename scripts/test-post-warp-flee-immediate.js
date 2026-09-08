@@ -26,6 +26,7 @@ const harness = Function(
    const isAiReplyInteractionActive = () => false;
    const shouldHoldFleePlayer = () => false;
    const countOtherPlayers = () => 1;
+   const submitAutomationIntent = () => ({ owner: 'PLAYER_FLEE', effects: [] });
    const dbg = () => {};
    const log = () => {};
    const doFlee = reason => { onFlee(reason); return true; };

@@ -104,14 +104,14 @@ const combatStart = source.indexOf('const combatLoop = setInterval(() => {');
 const combatEnd = source.indexOf('// AI Reply เป็น flow สนทนา', combatStart);
 assert(combatStart >= 0 && combatEnd > combatStart, 'combat-loop prelude seam not found');
 const combatPrelude = source.slice(combatStart, combatEnd);
-const collectorBusyIndex = combatPrelude.indexOf('if (lootQueue.isCollectorBusy()) {');
+const collectorBusyIndex = combatPrelude.indexOf("if (lootQueue.isCollectorActive() && automationDecision.owner !== 'COMBAT') {");
 const collectorSupportIndex = combatPrelude.indexOf('if (tryIdleSupportSkill(now)) return;', collectorBusyIndex);
-const fleeIndex = combatPrelude.indexOf('fleePlayersIfNeeded(', collectorSupportIndex);
+const fleeIndex = combatPrelude.indexOf('fleePlayersIfNeeded(');
 const normalSupportIndex = combatPrelude.lastIndexOf('if (tryIdleSupportSkill(now)) return;');
-const manualDrainAfterSupportSetIndex = combatPrelude.indexOf('if (manualSkillQueue.length && !manualSkillQueueTimer && !autoSupportQueue.length) drainManualSkillQueue();');
-assert(manualDrainAfterSupportSetIndex >= 0 && collectorBusyIndex > manualDrainAfterSupportSetIndex && collectorSupportIndex > collectorBusyIndex
-  && fleeIndex > collectorSupportIndex && normalSupportIndex > fleeIndex,
-  'Auto Support gets priority only while Collector is busy; otherwise Flee keeps its former safety priority');
+const manualDrainIndex = combatPrelude.indexOf('if (manualSkillQueue.length && !manualSkillQueueTimer && !autoSupportQueue.length) drainManualSkillQueue();');
+assert(manualDrainIndex >= 0 && fleeIndex > manualDrainIndex && collectorBusyIndex > fleeIndex
+  && collectorSupportIndex > collectorBusyIndex && normalSupportIndex > collectorSupportIndex,
+  'v2 Player safety must run before Collector support, while a draining Combat target may continue afterward');
 assert.match(source, /function queueSkillsNow\(\) \{[\s\S]{0,2200}if \(autoSupportQueue\.length\) \{[\s\S]{0,180}รอ Support Skill Set ปัจจุบันจบก่อน/,
   'a Manual Skill request must wait rather than split an active recipient Support Set');
 assert.match(source, /if \(\(manualSkillQueue\.length \|\| manualSkillQueueTimer\) && !autoSupportQueue\.length\) return false;/,

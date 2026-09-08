@@ -35,6 +35,26 @@ assert.deepStrictEqual(dead, {
   progressAgoMs: 0,
 }, 'death and respawn must be reported ahead of queued collection work');
 
+const orchestrating = reporter.update({
+  now: 3000,
+  masterEnabled: true,
+  socketConnected: true,
+  orchestrator: {
+    owner: 'PLAYER_FLEE', phase: 'preempt', mode: 'ACTIVE',
+    blockedBy: 'COLLECTOR', pendingIntent: 'PLAYER_FLEE',
+  },
+  collector: { busy: true, stage: 'pickup-wait', itemName: 'Jellopy' },
+});
+assert.deepStrictEqual(orchestrating, {
+  code: 'ORCHESTRATOR',
+  label: 'Orchestrator: PLAYER_FLEE',
+  detail: 'Phase preempt · Pending PLAYER_FLEE',
+  blocker: 'Blocked by COLLECTOR',
+  tone: 'waiting',
+  sinceMs: 0,
+  progressAgoMs: 0,
+}, 'an ownership transition must be visible instead of being masked by the old Collector state');
+
 const collecting = reporter.update({
   now: 4000,
   masterEnabled: true,
